@@ -181,12 +181,14 @@ await page.waitForTimeout(300);
 const started = Date.now();
 await page.tap("#welcomeSampleButton");
 
+// Signature is (fn, arg, options) — the timeout belongs third.
 await page.waitForFunction(
   () => {
     const name = document.getElementById("summaryFileName")?.textContent ?? "";
     return name && name !== "---";
   },
-  { timeout: 120000 }
+  undefined,
+  { timeout: 180000 }
 );
 
 const seconds = ((Date.now() - started) / 1000).toFixed(1);

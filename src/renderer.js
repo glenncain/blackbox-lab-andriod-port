@@ -24,7 +24,7 @@ import { APP_VERSION, checkForUpdate } from "./version.js";
 import { isNativePlatform } from "./platform/bridge.js";
 import { buildLogAnalysis } from "./analysis/logAnalysisBuilder.js";
 import { findTelemetryHeaderIndex } from "./analysis/telemetryHeader.js";
-import { getColumnValues } from "./analysis/mathHelpers.js";
+import { getColumnValues, fieldAt } from "./analysis/mathHelpers.js";
 import { getMetadataValue } from "./analysis/metadataReader.js";
 import {
   computeNoiseSpectrum,
@@ -531,9 +531,19 @@ function buildDataset(lines, pidAnalysis) {
   const headerLine = lines[headerIndex];
   const columnTable = buildColumnTable(lines, headerIndex);
   const columnValues = (name) => columnTable.get(name) ?? [];
+  // Unlike columnTable, this keeps row alignment: a blank or
+  // unparseable cell becomes null rather than vanishing, so
+  // indexes still line up across columns. Memoized because
+  // several labs ask for the same column.
+  const alignedCache = new Map();
+
   const alignedColumnValues = (columnName) => {
   if (!columnName) {
     return [];
+  }
+
+  if (alignedCache.has(columnName)) {
+    return alignedCache.get(columnName);
   }
 
   const headers = headerLine
@@ -553,6 +563,7 @@ function buildDataset(lines, pidAnalysis) {
     headers.indexOf(normalizedColumnName);
 
   if (columnIndex < 0) {
+    alignedCache.set(columnName, []);
     return [];
   }
 
@@ -563,10 +574,8 @@ function buildDataset(lines, pidAnalysis) {
     rowIndex < lines.length;
     rowIndex += 1
   ) {
-    const cells = lines[rowIndex].split(",");
-
     const rawValue =
-      cells[columnIndex]
+      fieldAt(lines[rowIndex], columnIndex)
         ?.trim()
         .replace(/^"|"$/g, "") ?? "";
 
@@ -583,6 +592,8 @@ function buildDataset(lines, pidAnalysis) {
         : null
     );
   }
+
+  alignedCache.set(columnName, values);
 
   return values;
 };

@@ -4,6 +4,7 @@
 import {
   detectStableFlightPhase
 } from "./flightPhase.js";
+import { fieldAt } from "./mathHelpers.js";
 function findMatchingColumns(columns, patterns) {
   if (!Array.isArray(columns)) {
     return [];
@@ -49,8 +50,7 @@ function extractNumericColumnValues(
     rowIndex < lines.length;
     rowIndex += sampleStep
   ) {
-    const cells = lines[rowIndex].split(",");
-    const value = Number(cells[columnIndex]);
+    const value = Number(fieldAt(lines[rowIndex], columnIndex));
 
     if (Number.isFinite(value)) {
       values.push(value);
@@ -106,9 +106,8 @@ function estimateSampleRate(lines, headerIndex) {
     rowIndex < lastRow;
     rowIndex += 1
   ) {
-    const cells = lines[rowIndex].split(",");
     const timeValue = Number(
-  cells[timeColumnIndex]
+  fieldAt(lines[rowIndex], timeColumnIndex)
     ?.trim()
     .replace(/^"|"$/g, "")
 );
@@ -207,10 +206,8 @@ function extractContiguousNumericWindow(
     rowIndex < lastDataRow;
     rowIndex += 1
   ) {
-    const cells = lines[rowIndex].split(",");
-
     const value = Number(
-      cells[columnIndex]
+      fieldAt(lines[rowIndex], columnIndex)
         ?.trim()
         .replace(/^"|"$/g, "")
     );
@@ -271,10 +268,8 @@ function extractAlignedNumericColumn(
     rowIndex < lines.length;
     rowIndex += 1
   ) {
-    const cells = lines[rowIndex].split(",");
-
     const rawValue =
-  cells[columnIndex]
+  fieldAt(lines[rowIndex], columnIndex)
     ?.trim()
     .replace(/^"|"$/g, "") ?? "";
 
@@ -803,8 +798,7 @@ const headspeedProfiles =
         return null;
       }
 
-      const cells = line.split(",");
-      const value = Number(cells[columnIndex]);
+      const value = Number(fieldAt(line, columnIndex));
 
       return Number.isFinite(value) ? value : null;
     })
