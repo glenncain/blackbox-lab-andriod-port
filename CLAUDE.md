@@ -136,5 +136,7 @@ renderer, the layout, the platform bridge, or the worker — only
 `tools/android-smoke.mjs` does, and it needs `npm run build:web`
 first. Run both.
 
-Neither runs on a real phone. Load times and memory behaviour on
-device are still unverified; see the end of the port log.
+Neither runs on a real phone. One tablet run confirmed a ~4s load
+and a responsive UI, but memory under a long log, the file picker,
+and everything at phone size are still unverified; see the end of
+the port log.

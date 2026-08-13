@@ -197,7 +197,7 @@ and never exposed.
 
 ## 6. What is verified, and what is not
 
-Verified, on two machines (this sandbox and a GitHub runner):
+Verified in the sandbox and on a GitHub runner:
 
 - 65 tests pass, including the `fieldAt` equivalence proof.
 - 18 smoke checks at Pixel 7 size: drawer, bridge, no horizontal
@@ -208,15 +208,38 @@ Verified, on two machines (this sandbox and a GitHub runner):
 - The desktop layout at 1280×900 still holds.
 - The APK assembles. CI does this on every push.
 
-**Not verified: any of it on a real phone.** Every number above comes
-from x86 Chromium. Specifically unknown:
+### On a real device
 
-- What ~6–10s of load becomes on a real device.
+First run on physical hardware — an Android tablet, debug APK from
+CI, landscape:
+
+- **~4s from opening a log to the first chart.** Faster than the
+  ~6–10s the sandbox predicted, which is the expected direction:
+  the profiler's budget is dominated by parse work, and a real ARM
+  device with a warm WebView does not pay the sandbox's startup tax.
+- **The UI stayed interactive while the log loaded.** This is the
+  worker earning its place. On the in-place path — which is what
+  Electron runs — the same work blocks the thread; on device it did
+  not. It is the one behaviour that could not be proven anywhere but
+  on hardware.
+- The app rendered a verdict from a real flight: vibration and rotor
+  speed findings, with their "what to do" lines intact.
+
+The tablet is wider than the 760px breakpoint, so it exercised the
+**desktop sidebar layout, not the mobile drawer** — the drawer is
+still unverified on hardware.
+
+Still unknown:
+
 - Whether memory survives — 41 MB of lines per thread plus 97 MB of
-  columns — even with `largeHeap`.
-- Whether the file picker actually surfaces `.bbl` files through a
-  real SAF provider.
+  columns — even with `largeHeap`. A single successful load is not
+  evidence about the ceiling; a long log on a smaller phone is the
+  test that matters.
+- Whether the file picker surfaces `.bbl` files through a real SAF
+  provider. Unknown because the run above did not establish which
+  path opened the log.
 - Whether touch zoom and the share sheet behave as documented.
+- Anything at phone size, on a phone.
 
 If memory is the thing that breaks, the fix is structural and already
 identified: stop round-tripping decoded frames through CSV text
