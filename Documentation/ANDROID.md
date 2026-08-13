@@ -135,18 +135,49 @@ directly instead (`fieldAt` in `mathHelpers.js`) brought the load
 down to **10 seconds**.
 
 That figure is from desktop-class hardware; expect a phone to be
-slower. Two things would help further, in order of value:
+slower.
 
-1. **Stop round-tripping frames through CSV text.** `csvAdapter.js`
-   exists so the analysis modules did not have to change when native
-   `.bbl` decoding arrived — a reasonable trade then, and now the
-   dominant remaining cost. Having analysis read frame objects
-   directly would remove both the 42 MB of strings and the parsing.
-2. **Move the work to a Web Worker.** The load is entirely on the
-   main thread, so the UI is frozen while it runs. A worker would not
-   make it faster but would let the progress indicator actually move.
+### The analysis worker
 
-Neither is Android-specific; both would speed up the desktop app too.
+Ten seconds of *frozen* app is still ten seconds of frozen app, so
+decoding and analysis now run in a Web Worker
+(`src/workers/analysisWorker.js`), with `analysisClient.js` as the
+main thread's half. The load takes the same time; the difference is
+that the app keeps running. Measured on the 8 MB sample: **over 400
+animation frames drawn during the load**, where previously the whole
+thing was one unbroken stall. The smoke test asserts this, so a
+regression back onto the main thread fails CI.
+
+Section 04 of `renderer.js` moved out to
+`src/analysis/datasetBuilder.js` unchanged to make this possible —
+it was already pure computation over the log, which is what let it
+cross the thread boundary at all.
+
+Two details worth knowing:
+
+- **Electron does not get the worker.** It loads the app from
+  `file://`, and Chromium refuses module workers on that origin. The
+  client detects this and runs in place — the same code on the same
+  thread the desktop app has always used. Android serves over
+  `https://` through Capacitor, so the phone, where the freeze
+  actually hurts, gets the worker. CI exercises both paths.
+- **Handing the results back is nearly free.** The naive versions
+  were not: the flight's lines cost ~430ms to clone as an array of
+  134k strings, and the 95-column table (12.7M numbers) another
+  ~430ms. Lines now cross as one joined string (~145ms, split back
+  in ~20ms) and the column table as transferable `Float64Array`
+  buffers, which move rather than copy — 3ms, and only one copy
+  stays alive. The dataset's two closures cannot be cloned at all;
+  `attachDatasetAccessors` rebuilds them on arrival.
+
+### Still on the table
+
+**Stop round-tripping frames through CSV text.** `csvAdapter.js`
+exists so the analysis modules did not have to change when native
+`.bbl` decoding arrived — a reasonable trade then, and now the
+dominant remaining cost. Having analysis read frame objects directly
+would remove both the 42 MB of strings and the parsing. Not
+Android-specific; it would speed up the desktop app too.
 
 ---
 
@@ -160,10 +191,11 @@ npm run build:web && node tools/android-smoke.mjs
 `tools/android-smoke.mjs` drives the `www/` build in Chromium at
 Pixel 7 size with touch enabled, and checks the drawer, the platform
 bridge, horizontal overflow, and that the 8 MB sample still decodes
-and produces a verdict. It then re-checks the same build at 1280×900
-to confirm the desktop layout still holds — `index.html` and
-`index.css` are shared with the Electron build, so a mobile-only
-change can reach Windows and macOS.
+and produces a verdict — including that the UI keeps drawing frames
+while it does. It then runs the same load again with `Worker`
+removed, which is the path Electron takes, and finally re-checks the
+layout at 1280×900: `index.html` and `index.css` are shared with the
+desktop build, so a mobile-only change can reach Windows and macOS.
 
 Set `PLAYWRIGHT_CHROMIUM` to a Chromium binary if Playwright cannot
 find one.

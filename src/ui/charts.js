@@ -15,6 +15,9 @@
 // ======================================================
 
 import uPlot from "../vendor/uplot/uPlot.esm.js";
+import { CHART_COLORS } from "./chartColors.js";
+
+export { CHART_COLORS };
 
 // Phones get different wording and a different zoom gesture.
 // (See the .u-over touch-action rule in index.css: it frees
@@ -23,16 +26,6 @@ import uPlot from "../vendor/uplot/uPlot.esm.js";
 const IS_TOUCH =
   typeof matchMedia === "function" &&
   matchMedia("(hover: none) and (pointer: coarse)").matches;
-
-// Colorblind-safe series palette tuned for dark surfaces.
-export const CHART_COLORS = [
-  "#3987e5", // blue
-  "#d95926", // orange
-  "#199e70", // green-aqua
-  "#c98500", // amber
-  "#d55181", // magenta
-  "#9085e9" // violet
-];
 
 const AXIS_STYLE = {
   stroke: "#8ea6cc",

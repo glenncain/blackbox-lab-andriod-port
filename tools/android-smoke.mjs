@@ -176,6 +176,35 @@ await page.waitForTimeout(300);
 await page.tap('.nav-button[data-target="home"]');
 await page.waitForTimeout(300);
 
+check(
+  "analysis runs in a worker",
+  await page.evaluate(async () => {
+    const { usingWorker } = await import("./analysis/analysisClient.js");
+    return usingWorker();
+  })
+);
+
+// The point of the worker is that the UI keeps running. Watch
+// the longest gap between animation frames while the log loads:
+// on the main thread this was the whole decode, seconds long.
+await page.evaluate(() => {
+  globalThis.__frameGaps = { worst: 0, frames: 0 };
+  let last = performance.now();
+
+  const tick = () => {
+    const now = performance.now();
+    globalThis.__frameGaps.worst = Math.max(
+      globalThis.__frameGaps.worst,
+      now - last
+    );
+    globalThis.__frameGaps.frames += 1;
+    last = now;
+    requestAnimationFrame(tick);
+  };
+
+  requestAnimationFrame(tick);
+});
+
 // The welcome panel's button is the visible entry point; the one
 // in the log card stays hidden until a log is loaded.
 const started = Date.now();
@@ -193,6 +222,19 @@ await page.waitForFunction(
 
 const seconds = ((Date.now() - started) / 1000).toFixed(1);
 console.log(`  ok  8 MB sample decoded and analysed in ${seconds}s`);
+
+const gaps = await page.evaluate(() => globalThis.__frameGaps);
+console.log(
+  `      main thread: ${gaps.frames} frames drawn during the load, ` +
+    `longest stall ${Math.round(gaps.worst)}ms`
+);
+
+// Rendering the results is main-thread work and legitimately
+// blocks; the decode and analysis no longer should.
+check(
+  "UI kept running during the load (no multi-second stall)",
+  gaps.worst < 2500
+);
 
 check(
   "verdict rendered",
@@ -212,7 +254,81 @@ await page.tap('.nav-button[data-target="filter"]');
 await page.waitForTimeout(1200);
 await page.screenshot({ path: "smoke-shots/android-filter-lab.png" });
 
-// ---- report ----
+// ---- compare (a second log, also analysed off-thread) ----
+
+await page.tap("#mobileMenuButton");
+await page.waitForTimeout(250);
+await page.tap('.nav-button[data-target="compare"]');
+await page.waitForTimeout(300);
+await page.tap("#compareSampleButton");
+
+await page.waitForFunction(
+  () => !document.getElementById("compareResultCard")?.hidden,
+  undefined,
+  { timeout: 180000 }
+);
+
+check(
+  "compare against a second log renders",
+  await page.evaluate(
+    () =>
+      (document.getElementById("compareSummary")?.textContent ?? "").length > 10
+  )
+);
+
+// ---- the in-place path must still work ----
+//
+// Electron loads from file://, where module workers are refused,
+// so the desktop build always takes the fallback. Nothing else
+// in CI exercises it. Removing Worker reproduces that here.
+
+const noWorker = await browser.newContext({ ...devices["Pixel 7"] });
+const fallbackPage = await noWorker.newPage();
+
+await fallbackPage.addInitScript(() => {
+  delete globalThis.Worker;
+});
+
+const fallbackProblems = [];
+fallbackPage.on("pageerror", (error) =>
+  fallbackProblems.push(`PAGEERROR: ${error.message}`)
+);
+
+await fallbackPage.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "load" });
+await fallbackPage.waitForTimeout(500);
+
+if (await fallbackPage.isVisible("#contributeAsk")) {
+  await fallbackPage.click("#askNo");
+}
+
+check(
+  "without Worker, the client reports no worker",
+  !(await fallbackPage.evaluate(async () => {
+    const { usingWorker } = await import("./analysis/analysisClient.js");
+    return usingWorker();
+  }))
+);
+
+await fallbackPage.tap("#welcomeSampleButton");
+await fallbackPage.waitForFunction(
+  () => {
+    const name = document.getElementById("summaryFileName")?.textContent ?? "";
+    return name && name !== "---";
+  },
+  undefined,
+  { timeout: 180000 }
+);
+
+check(
+  "in-place path still produces a verdict",
+  await fallbackPage.evaluate(
+    () => (document.getElementById("verdictCard")?.textContent ?? "").length > 60
+  )
+);
+
+for (const problem of fallbackProblems) {
+  problems.push(`[in-place] ${problem}`);
+}
 
 // ---- desktop layout must survive ----
 //
