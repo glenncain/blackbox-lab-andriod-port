@@ -120,6 +120,25 @@ npm start        # run the app
 npm test         # run the test suite
 ```
 
+### Android
+
+This fork also builds for Android, wrapping the same app in a
+native WebView with Capacitor. The desktop build is unchanged.
+
+```
+npm run android:sync     # build www/ and copy it into android/
+npm run android:build    # assemble a debug APK
+```
+
+How it works — architecture, and what a phone needed that the
+desktop did not — is in
+[Documentation/ANDROID.md](Documentation/ANDROID.md).
+
+Why it is built that way — what was measured, what was tried, and
+which reasonable-looking approaches turned out to be wrong — is in
+[Documentation/ANDROID-PORT-LOG.md](Documentation/ANDROID-PORT-LOG.md).
+Read that one before changing the port.
+
 Then click "Open Blackbox Log" and pick a `.bbl`, `.csv` or CLI
 dump — or try `samples/sample-bell-222ut.bbl` (a real
 recorded flight) and visit

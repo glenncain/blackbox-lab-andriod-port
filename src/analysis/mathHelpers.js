@@ -1,3 +1,31 @@
+// Reads one comma-separated field without splitting the whole
+// line. A telemetry row has ~40 columns, so split(",")[i] throws
+// away 39 freshly allocated strings every time it is called — and
+// on a 134k-frame log, once per row per column read. That is the
+// single biggest cost in analysing a large flight.
+//
+// Returns undefined when the row has fewer fields than asked for,
+// exactly as split(",")[i] does, so Number() still yields NaN.
+export function fieldAt(line, index) {
+  let start = 0;
+
+  for (let i = 0; i < index; i += 1) {
+    const next = line.indexOf(",", start);
+
+    if (next < 0) {
+      return undefined;
+    }
+
+    start = next + 1;
+  }
+
+  const end = line.indexOf(",", start);
+
+  return end < 0
+    ? line.slice(start)
+    : line.slice(start, end);
+}
+
 export function getColumnValues(
   lines,
   headerIndex,
@@ -21,11 +49,21 @@ export function getColumnValues(
     return [];
   }
 
-  return lines
-    .slice(headerIndex + 1)
-    .map((line) => line.split(",")[columnIndex])
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value));
+  const values = [];
+
+  for (
+    let rowIndex = headerIndex + 1;
+    rowIndex < lines.length;
+    rowIndex += 1
+  ) {
+    const value = Number(fieldAt(lines[rowIndex], columnIndex));
+
+    if (Number.isFinite(value)) {
+      values.push(value);
+    }
+  }
+
+  return values;
 }
 
 export function getColumnSamples(
@@ -58,8 +96,7 @@ export function getColumnSamples(
     rowIndex < lines.length;
     rowIndex += 1
   ) {
-    const cells = lines[rowIndex].split(",");
-    const value = Number(cells[columnIndex]);
+    const value = Number(fieldAt(lines[rowIndex], columnIndex));
 
     if (Number.isFinite(value)) {
       samples.push({
@@ -163,8 +200,7 @@ export function getColumnValuesByRowIndexes(
         return null;
       }
 
-      const cells = line.split(",");
-      const value = Number(cells[columnIndex]);
+      const value = Number(fieldAt(line, columnIndex));
 
       return Number.isFinite(value)
         ? value

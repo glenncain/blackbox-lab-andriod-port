@@ -1046,3 +1046,141 @@ body:not(.log-loaded) .loaded-only { display: none; }
 .nav-lock:hover {
   background: rgba(111, 178, 255, 0.12);
 }
+
+/* ======================================================
+   MOBILE / ANDROID
+   The desktop layout is a fixed 250px sidebar beside a
+   scrolling workspace. On a phone the sidebar becomes a
+   drawer and the workspace gets the whole screen.
+   ====================================================== */
+
+/* Hidden on desktop; the media query below turns it on. */
+.mobile-bar {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 12px;
+  padding-top: env(safe-area-inset-top);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.mobile-menu-button {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 18px;
+  line-height: 1;
+  padding: 9px 13px;
+}
+
+.mobile-bar-title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.sidebar-scrim {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-bar {
+    display: flex;
+  }
+
+  /* 100dvh, not 100vh: Android's collapsing URL bar makes
+     100vh taller than the screen and buries the last card. */
+  .app {
+    height: calc(100dvh - 56px - env(safe-area-inset-top));
+  }
+
+  .sidebar {
+    position: fixed;
+    top: calc(56px + env(safe-area-inset-top));
+    bottom: 0;
+    left: 0;
+    width: min(82vw, 300px);
+    z-index: 45;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    padding: 18px 16px;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  /* The drawer already says where you are. */
+  .sidebar h1,
+  .tagline {
+    display: none;
+  }
+
+  .sidebar-scrim:not([hidden]) {
+    display: block;
+    position: fixed;
+    inset: calc(56px + env(safe-area-inset-top)) 0 0 0;
+    background: rgba(4, 8, 14, 0.6);
+    z-index: 44;
+  }
+
+  .workspace {
+    padding: 20px 16px 48px 16px;
+  }
+
+  .workspace h2 {
+    font-size: 23px;
+  }
+
+  /* Touch targets: 44px is the floor that stops mis-taps. */
+  .nav-button {
+    padding: 13px 14px;
+  }
+
+  /* A 360px phone leaves ~328px of content width. The 160/170px
+     floors already give two tidy columns of stat tiles there, so
+     they only need trimming to survive a 320px screen. */
+  .summary-grid,
+  .metric-grid,
+  .welcome-steps {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+  }
+
+  /* 230px cannot fit two up on any phone — go single column
+     rather than leave a ragged half-empty row. */
+  .quality-chips {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar {
+    transition: none;
+  }
+}
+
+/* Charts are canvas: they need an explicit floor or they
+   collapse, and room to be readable on a narrow screen. */
+@media (max-width: 760px) {
+  .chart-footer-hint {
+    white-space: normal;
+    margin-left: 0;
+  }
+}
+
+/* uPlot binds mouse events; Chrome only synthesises those from
+   touch when the browser is not already using the gesture to
+   scroll. pan-y hands horizontal drags (zoom) to the chart and
+   keeps vertical scrolling for the page. */
+@media (hover: none) and (pointer: coarse) {
+  .u-over {
+    touch-action: pan-y;
+  }
+}

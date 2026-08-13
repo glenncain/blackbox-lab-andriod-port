@@ -2,14 +2,32 @@
 <html>
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0d1524" />
   <title>Blackbox Lab</title>
+  <link rel="icon"
+        href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1524'/%3E%3Cpath d='M5 21l6-8 5 6 4-5 7 9z' fill='%236fb2ff'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="index.css" />
   <link rel="stylesheet" href="vendor/uplot/uPlot.min.css" />
 </head>
 
 <body>
+  <!-- Narrow screens only: the sidebar becomes a drawer. -->
+  <header class="mobile-bar">
+    <button class="mobile-menu-button"
+            id="mobileMenuButton"
+            aria-label="Open navigation"
+            aria-controls="appSidebar"
+            aria-expanded="false">☰</button>
+    <span class="mobile-bar-title">Blackbox Lab</span>
+  </header>
+
+  <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
+
   <div class="app">
-    <aside class="sidebar">
+    <aside class="sidebar" id="appSidebar">
       <h1>Blackbox Lab</h1>
       <p class="tagline">Rotorflight Analysis Suite</p>
 
@@ -961,6 +979,10 @@ current demand; the steady downward slope is normal discharge.
     </div>
   </div>
 
+  <!-- Installs window.blackboxLab when Electron's preload has
+       not (Android, plain browser). Must precede the renderer. -->
+  <script type="module" src="./platform/bridge.js"></script>
+  <script type="module" src="./platform/mobile.js"></script>
   <script type="module" src="./renderer.js"></script>
 </body>
 </html>
