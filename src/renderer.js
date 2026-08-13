@@ -2306,25 +2306,38 @@ window.addEventListener("drop", async (event) => {
 
 // ======================================================
 // Update check on startup (silent when offline/current).
+//
+// Desktop only. The releases this checks against carry
+// installers for Windows, macOS and Linux — there is no
+// APK there, so on a native build the banner would tell a
+// pilot to update and then hand them a page they cannot
+// update from. Better to say nothing than to say something
+// they cannot act on. Skipping the call rather than hiding
+// the banner also spares a request on mobile data.
+//
+// If Android ever ships its own releases, this becomes a
+// question of which feed to ask, not whether to ask.
 // ======================================================
 
 const updateBanner = el("updateBanner");
 const UPDATE_DISMISS_KEY = "blackboxLabUpdateDismissed";
 
-checkForUpdate(APP_VERSION).then((update) => {
-  if (!update || !updateBanner) return;
-  if (localStorage.getItem(UPDATE_DISMISS_KEY) === update.version) return;
+if (!isNativePlatform) {
+  checkForUpdate(APP_VERSION).then((update) => {
+    if (!update || !updateBanner) return;
+    if (localStorage.getItem(UPDATE_DISMISS_KEY) === update.version) return;
 
-  el("updateBannerText").textContent =
-    `A new version of Blackbox Lab is out (${update.version} — you have v${APP_VERSION}).`;
-  updateBanner.hidden = false;
+    el("updateBannerText").textContent =
+      `A new version of Blackbox Lab is out (${update.version} — you have v${APP_VERSION}).`;
+    updateBanner.hidden = false;
 
-  el("updateBannerButton").addEventListener("click", () => {
-    window.blackboxLab?.openExternal?.(update.url);
+    el("updateBannerButton").addEventListener("click", () => {
+      window.blackboxLab?.openExternal?.(update.url);
+    });
+
+    el("updateBannerDismiss").addEventListener("click", () => {
+      localStorage.setItem(UPDATE_DISMISS_KEY, update.version);
+      updateBanner.hidden = true;
+    });
   });
-
-  el("updateBannerDismiss").addEventListener("click", () => {
-    localStorage.setItem(UPDATE_DISMISS_KEY, update.version);
-    updateBanner.hidden = true;
-  });
-});
+}
