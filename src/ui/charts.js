@@ -16,6 +16,14 @@
 
 import uPlot from "../vendor/uplot/uPlot.esm.js";
 
+// Phones get different wording and a different zoom gesture.
+// (See the .u-over touch-action rule in index.css: it frees
+// horizontal drags for uPlot while leaving vertical scroll
+// to the page.)
+const IS_TOUCH =
+  typeof matchMedia === "function" &&
+  matchMedia("(hover: none) and (pointer: coarse)").matches;
+
 // Colorblind-safe series palette tuned for dark surfaces.
 export const CHART_COLORS = [
   "#3987e5", // blue
@@ -170,7 +178,9 @@ function buildChartFooter(element, chart, seriesMeta, { withStats }) {
 
   const hint = document.createElement("div");
   hint.className = "chart-footer-hint";
-  hint.textContent = "drag to zoom · double-click to reset";
+  hint.textContent = IS_TOUCH
+    ? "drag across to zoom · double-tap to reset"
+    : "drag to zoom · double-click to reset";
   footer.appendChild(hint);
 
   element.appendChild(footer);

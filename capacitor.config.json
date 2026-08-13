@@ -1,0 +1,13 @@
+{
+  "appId": "com.blackboxlab.app",
+  "appName": "Blackbox Lab",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": true
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

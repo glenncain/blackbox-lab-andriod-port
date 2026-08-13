@@ -21,6 +21,7 @@ import {
   CONTRIBUTE_APP_VERSION
 } from "./contribute/config.js";
 import { APP_VERSION, checkForUpdate } from "./version.js";
+import { isNativePlatform } from "./platform/bridge.js";
 import { buildLogAnalysis } from "./analysis/logAnalysisBuilder.js";
 import { findTelemetryHeaderIndex } from "./analysis/telemetryHeader.js";
 import { getColumnValues } from "./analysis/mathHelpers.js";
@@ -2452,7 +2453,7 @@ function analyzeFlight(flightIndex) {
 // 07. REPORT BUILDER
 // ======================================================
 
-buildReportButton.addEventListener("click", () => {
+buildReportButton.addEventListener("click", async () => {
   if (!currentDataset || !currentFlightLines) {
     return;
   }
@@ -2488,9 +2489,10 @@ buildReportButton.addEventListener("click", () => {
   const baseName = (summaryFileName.textContent || "flight")
     .replace(/\.[^.]+$/, "");
 
-  downloadReport(html, `blackbox-lab-report-${baseName}.html`);
-  reportStatus.textContent =
-    "Report saved — check your downloads folder.";
+  await downloadReport(html, `blackbox-lab-report-${baseName}.html`);
+  reportStatus.textContent = isNativePlatform
+    ? "Report ready — pick where to send it."
+    : "Report saved — check your downloads folder.";
 });
 
 

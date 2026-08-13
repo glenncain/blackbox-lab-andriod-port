@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Blackbox Lab</string>
+    <string name="title_activity_main">Blackbox Lab</string>
+    <string name="package_name">com.blackboxlab.app</string>
+    <string name="custom_url_scheme">com.blackboxlab.app</string>
+</resources>

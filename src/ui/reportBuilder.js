@@ -11,6 +11,8 @@
 //
 // ======================================================
 
+import { isNativePlatform, saveReport } from "../platform/bridge.js";
+
 function chartImage(entry) {
   if (entry.image) {
     return entry.image;
@@ -248,7 +250,21 @@ export function buildReportHtml({
 </html>`;
 }
 
-export function downloadReport(html, fileName) {
+export async function downloadReport(html, fileName) {
+  // On Android an <a download> click is swallowed by the WebView
+  // and the pilot gets no file and no error. Hand the report to
+  // the share sheet instead — that is also how it leaves the phone.
+  if (isNativePlatform) {
+    try {
+      if (await saveReport(html, fileName)) {
+        return;
+      }
+    } catch {
+      // Share cancelled or unavailable — fall through to the
+      // browser path rather than losing the report silently.
+    }
+  }
+
   const blob = new Blob([html], { type: "text/html" });
   const url = URL.createObjectURL(blob);
 
