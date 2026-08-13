@@ -120,6 +120,20 @@ npm start        # run the app
 npm test         # run the test suite
 ```
 
+### Android
+
+This fork also builds for Android, wrapping the same app in a
+native WebView with Capacitor. The desktop build is unchanged.
+
+```
+npm run android:sync     # build www/ and copy it into android/
+npm run android:build    # assemble a debug APK
+```
+
+Full notes — architecture, what a phone needed that the desktop
+did not, and the performance work — are in
+[Documentation/ANDROID.md](Documentation/ANDROID.md).
+
 Then click "Open Blackbox Log" and pick a `.bbl`, `.csv` or CLI
 dump — or try `samples/sample-bell-222ut.bbl` (a real
 recorded flight) and visit

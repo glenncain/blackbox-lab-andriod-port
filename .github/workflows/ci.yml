@@ -15,3 +15,54 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm test
+
+  # Drives the www/ build in a real browser at phone size. The
+  # Electron smoke test cannot see any of this: the drawer, the
+  # platform bridge, or whether a large .bbl still decodes when
+  # it arrives as a web asset instead of over IPC. It also
+  # asserts the desktop layout, since index.html and index.css
+  # are shared with the Electron build.
+  web-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build:web
+      - name: Smoke test at phone size
+        env:
+          # Ubuntu runners ship Chrome; playwright-core does not
+          # download browsers of its own.
+          PLAYWRIGHT_CHROMIUM: /usr/bin/google-chrome
+        run: node tools/android-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-shots
+          path: smoke-shots/
+          if-no-files-found: ignore
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+      - name: Build web assets and sync into the Android project
+        run: npm run android:sync
+      - name: Assemble debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blackbox-lab-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
