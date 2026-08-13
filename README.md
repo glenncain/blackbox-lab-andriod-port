@@ -130,9 +130,14 @@ npm run android:sync     # build www/ and copy it into android/
 npm run android:build    # assemble a debug APK
 ```
 
-Full notes — architecture, what a phone needed that the desktop
-did not, and the performance work — are in
+How it works — architecture, and what a phone needed that the
+desktop did not — is in
 [Documentation/ANDROID.md](Documentation/ANDROID.md).
+
+Why it is built that way — what was measured, what was tried, and
+which reasonable-looking approaches turned out to be wrong — is in
+[Documentation/ANDROID-PORT-LOG.md](Documentation/ANDROID-PORT-LOG.md).
+Read that one before changing the port.
 
 Then click "Open Blackbox Log" and pick a `.bbl`, `.csv` or CLI
 dump — or try `samples/sample-bell-222ut.bbl` (a real

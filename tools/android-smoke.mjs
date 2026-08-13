@@ -13,51 +13,15 @@
 // ======================================================
 
 import { chromium, devices } from "playwright-core";
-import { createServer } from "node:http";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
 import { mkdirSync } from "node:fs";
+import { serveWww } from "./lib/serveWww.mjs";
 
-const WWW = new URL("../www/", import.meta.url).pathname;
 const PORT = 4173;
 
-const MIME = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".mjs": "text/javascript",
-  ".css": "text/css",
-  ".json": "application/json",
-  ".bbl": "application/octet-stream",
-  ".png": "image/png"
-};
-
-// ---- static server ----
-
-const server = createServer(async (request, response) => {
-  const path = decodeURIComponent(request.url.split("?")[0]);
-  const relative = normalize(path).replace(/^(\.\.[/\\])+/, "");
-  const file = join(WWW, relative === "/" ? "index.html" : relative);
-
-  try {
-    const info = await stat(file);
-
-    if (!info.isFile()) {
-      throw new Error("not a file");
-    }
-
-    response.writeHead(200, {
-      "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
-      "Content-Length": info.size
-    });
-
-    createReadStream(file).pipe(response);
-  } catch {
-    response.writeHead(404).end("not found");
-  }
-});
-
-await new Promise((resolve) => server.listen(PORT, resolve));
+const server = await serveWww(
+  new URL("../www/", import.meta.url).pathname,
+  PORT
+);
 
 // ---- browser ----
 

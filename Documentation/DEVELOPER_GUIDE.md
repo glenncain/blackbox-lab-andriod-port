@@ -13,13 +13,21 @@ src/
   index.html          All screens (one <section data-screen> each)
   index.css           Styling
   renderer.js         Wires everything: file → decode → analyze → draw
+  platform/           NEW (Android port)
+    bridge.js         window.blackboxLab when Electron's preload has not run
+    mobile.js         Nav drawer + Android file-picker widening
+  workers/            NEW (Android port)
+    analysisWorker.js decode + analysis off the main thread
   ui/
     navigation.js     Sidebar ⇄ screen switching
     charts.js         uPlot wrappers (time series + spectrum)
+    chartColors.js    NEW: palette, split out so the worker can use it
     screenUpdater.js  Your original results renderer (untouched)
   analysis/
     ...               Your original analysis modules (untouched)
-    bbl/              NEW: native binary .bbl decoder
+    analysisClient.js NEW: talks to the worker, falls back in place
+    datasetBuilder.js NEW: was section 04 of renderer.js, moved out intact
+    bbl/              native binary .bbl decoder
       byteStream.js     encodings (VB, zigzag, TAG groups)
       headerParser.js   header lines → field definitions
       frameDecoder.js   frames + predictors + corruption resync
@@ -27,11 +35,20 @@ src/
       csvAdapter.js     decoded flight → CSV-shaped lines
     dsp/
       fft.js          FFT + Welch noise spectrum
+scripts/
+  build-web.mjs           src/ + samples/ → www/ for the Android build
 tools/
   generateSampleLog.mjs   synthetic test flights (known truth)
+  ui-smoke.cjs            drives the real Electron app
+  android-smoke.mjs       drives the web build at phone size
+  profile-load.mjs        CPU profile of opening a log
 samples/                  three ready-made .bbl flights
+android/                  Capacitor project (committed)
 test/                     run with: npm test
 ```
+
+The Android port is documented separately: `ANDROID.md` for how it
+works, `ANDROID-PORT-LOG.md` for why it is built that way.
 
 ## The key design decision
 
