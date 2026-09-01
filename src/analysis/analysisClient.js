@@ -147,7 +147,8 @@ function analyzeInPlace(lines, fileType, onProgress) {
     extraSummary,
     telemetryText,
     filterAnalysis,
-    pidAnalysis
+    pidAnalysis,
+    profileSegments
   } = buildLogAnalysis({ fileType, lines, aircraftProfiles });
 
   onProgress?.("Working out what happened…");
@@ -157,6 +158,7 @@ function analyzeInPlace(lines, fileType, onProgress) {
     telemetryText,
     filterAnalysis,
     pidAnalysis,
+    profileSegments,
     dataset: buildDataset(lines, pidAnalysis)
   };
 }

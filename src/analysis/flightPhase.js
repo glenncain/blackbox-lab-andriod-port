@@ -25,7 +25,7 @@ function getMedian(values) {
   return sorted[middle];
 }
 
-function estimateSampleRate(timeSeconds) {
+export function estimateSampleRate(timeSeconds) {
   if (!Array.isArray(timeSeconds) || timeSeconds.length < 3) {
     return null;
   }
@@ -64,7 +64,8 @@ function buildCandidateMask({
   timeSeconds,
   headspeed,
   governorTarget,
-  sampleCount
+  sampleCount,
+  sampleRateHz = 100
 }) {
   const mask =
     new Array(sampleCount).fill(false);
@@ -86,6 +87,19 @@ function buildCandidateMask({
         numericValue >= 500
       );
     });
+
+  // With no target to measure against, a plateau is found by asking
+  // whether rotor speed is going anywhere — which has to be asked of
+  // the trend, not of two lone samples four seconds apart. Sensor
+  // jitter alone clears the movement limit often enough to punch
+  // holes through every candidate stretch, and a plateau full of
+  // holes contains no segment long enough to count.
+  const smoothedHeadspeed = hasUsableGovernorTarget
+    ? null
+    : buildRollingMean(
+        headspeed.slice(0, sampleCount).map(Number),
+        Math.max(3, Math.round(sampleRateHz))
+      );
 
   let earlierIndex = 0;
   let laterIndex = 0;
@@ -186,12 +200,14 @@ function buildCandidateMask({
 
     const earlierActual =
       Number(
-        headspeed[earlierIndex]
+        smoothedHeadspeed?.[earlierIndex] ??
+          headspeed[earlierIndex]
       );
 
     const laterActual =
       Number(
-        headspeed[laterIndex]
+        smoothedHeadspeed?.[laterIndex] ??
+          headspeed[laterIndex]
       );
 
     if (
@@ -358,30 +374,191 @@ function keepStableSegments({
   };
 }
 
+// Rotor speed is the preferred way to find steady flight.
+// Aircraft without an RPM sensor (nitro and turbine models,
+// or electric models flown without the sensor wired) log
+// headspeed as a constant zero, so the check below decides
+// which detection basis this log can support.
+export function hasUsableRotorSpeed(values) {
+  if (!Array.isArray(values)) {
+    return false;
+  }
+
+  return values.some((value) => {
+    const numericValue = Number(value);
+
+    return (
+      Number.isFinite(numericValue) &&
+      numericValue >= 500
+    );
+  });
+}
+
+export function buildRollingMean(values, windowSamples) {
+  const smoothed = new Array(values.length).fill(null);
+
+  const half = Math.max(1, Math.round(windowSamples / 2));
+
+  // null means MISSING, and Number(null) is 0 — without the
+  // explicit check, gaps average into the window as zeros and
+  // dilute every smoothed signal near a dropout (an 8% droop
+  // straddling a gap can read below the event band).
+  const finiteAt = (index) => {
+    const value = values[index];
+    return value !== null &&
+      value !== undefined &&
+      Number.isFinite(Number(value))
+      ? Number(value)
+      : null;
+  };
+
+  let runningTotal = 0;
+  let runningCount = 0;
+
+  for (
+    let index = 0;
+    index < values.length + half;
+    index += 1
+  ) {
+    if (index < values.length) {
+      const entering = finiteAt(index);
+
+      if (entering !== null) {
+        runningTotal += entering;
+        runningCount += 1;
+      }
+    }
+
+    const leavingIndex = index - 2 * half;
+
+    if (leavingIndex >= 0) {
+      const leaving = finiteAt(leavingIndex);
+
+      if (leaving !== null) {
+        runningTotal -= leaving;
+        runningCount -= 1;
+      }
+    }
+
+    const centre = index - half;
+
+    if (centre >= 0 && centre < values.length) {
+      smoothed[centre] =
+        runningCount > 0
+          ? runningTotal / runningCount
+          : null;
+    }
+  }
+
+  return smoothed;
+}
+
+function getPercentile(values, fraction) {
+  const usable = values
+    .filter((value) => Number.isFinite(Number(value)))
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  if (usable.length === 0) {
+    return null;
+  }
+
+  const position = Math.min(
+    usable.length - 1,
+    Math.max(0, Math.round((usable.length - 1) * fraction))
+  );
+
+  return usable[position];
+}
+
+// Without rotor speed, sustained airframe motion is what
+// separates flight from sitting on the ground. The quiet
+// and busy ends of the recording set the threshold, so the
+// result does not depend on any absolute gyro magnitude.
+function buildActivityMask({
+  activity,
+  sampleCount,
+  sampleRateHz
+}) {
+  const windowSamples = Math.max(
+    3,
+    Math.round(sampleRateHz)
+  );
+
+  const smoothed = buildRollingMean(
+    activity.slice(0, sampleCount),
+    windowSamples
+  );
+
+  const quietLevel = getPercentile(smoothed, 0.1);
+  const busyLevel = getPercentile(smoothed, 0.9);
+
+  if (
+    !Number.isFinite(quietLevel) ||
+    !Number.isFinite(busyLevel) ||
+    busyLevel <= 0
+  ) {
+    return null;
+  }
+
+  // A model sitting on the ground still logs a little gyro
+  // noise, so contrast alone is not enough to call something
+  // flight — noise against quieter noise still forms a ratio.
+  // The busy end must also clear a floor of real rotation.
+  // The floor is deliberately far below any flying model, so
+  // gentle hovering still qualifies.
+  const MINIMUM_FLIGHT_ROTATION = 15;
+
+  if (
+    busyLevel < MINIMUM_FLIGHT_ROTATION ||
+    busyLevel < quietLevel * 1.5
+  ) {
+    return null;
+  }
+
+  const threshold =
+    quietLevel + (busyLevel - quietLevel) * 0.25;
+
+  const mask = new Array(sampleCount).fill(false);
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const value = smoothed[index];
+
+    if (Number.isFinite(value) && value >= threshold) {
+      mask[index] = true;
+    }
+  }
+
+  return mask;
+}
+
 export function detectStableFlightPhase({
   timeSeconds = [],
   headspeed = [],
-  governorTarget = []
+  governorTarget = [],
+  activity = []
 }) {
 const hasGovernorTarget =
   governorTarget.length > 0;
-console.log("FLIGHT PHASE DEBUG", {
-  timeCount: timeSeconds.length,
-  headspeedCount: headspeed.length,
-  governorTargetCount: governorTarget?.length ?? 0,
-  hasGovernorTarget
-});
+const hasRotorSpeedData = hasUsableRotorSpeed(headspeed);
+const hasActivitySignal =
+  Array.isArray(activity) && activity.length > 0;
 const sampleCount =
-  hasGovernorTarget
+  !hasRotorSpeedData && hasActivitySignal
     ? Math.min(
         timeSeconds.length,
-        headspeed.length,
-        governorTarget.length
+        activity.length
       )
-    : Math.min(
-        timeSeconds.length,
-        headspeed.length
-      );
+    : hasGovernorTarget
+      ? Math.min(
+          timeSeconds.length,
+          headspeed.length,
+          governorTarget.length
+        )
+      : Math.min(
+          timeSeconds.length,
+          headspeed.length
+        );
 
   if (sampleCount < 100) {
     return {
@@ -390,6 +567,8 @@ const sampleCount =
       stableIndexes: [],
       segments: [],
       stableSampleCount: 0,
+      hasRotorSpeedData,
+      basis: "none",
       reason: "Not enough aligned samples were available."
     };
   }
@@ -422,19 +601,56 @@ const sampleCount =
     Math.round(sampleRateHz * 3)
   );
 
-  const candidateMask = buildCandidateMask({
-  timeSeconds: alignedTime,
-  headspeed: alignedHeadspeed,
-  governorTarget: alignedTarget,
-  sampleCount
-});
+  const activityMask =
+    !hasRotorSpeedData && hasActivitySignal
+      ? buildActivityMask({
+          activity,
+          sampleCount,
+          sampleRateHz
+        })
+      : null;
+
+  const basis = hasRotorSpeedData
+    ? "headspeed"
+    : activityMask
+      ? "activity"
+      : "none";
+
+  if (basis === "none") {
+    return {
+      sampleRateHz,
+      stableMask: new Array(sampleCount).fill(false),
+      stableIndexes: [],
+      segments: [],
+      stableSampleCount: 0,
+      hasRotorSpeedData,
+      basis,
+      movedDuringRecording: hasActivitySignal ? false : null,
+      reason: hasActivitySignal
+        ? "This log contains no rotor-speed data, and the airframe did not move during the recording, so no flight section could be identified."
+        : "This log contains no rotor-speed data, so a governed-flight section could not be identified."
+    };
+  }
+
+  const candidateMask =
+    basis === "activity"
+      ? activityMask
+      : buildCandidateMask({
+          timeSeconds: alignedTime,
+          headspeed: alignedHeadspeed,
+          governorTarget: alignedTarget,
+          sampleCount,
+          sampleRateHz
+        });
 
   const transitionCleanedMask =
-    removeTargetTransitions({
-      mask: candidateMask,
-      governorTarget: alignedTarget,
-      transitionWindowSamples
-    });
+    basis === "activity"
+      ? candidateMask
+      : removeTargetTransitions({
+          mask: candidateMask,
+          governorTarget: alignedTarget,
+          transitionWindowSamples
+        });
 
   const {
     stableMask,
@@ -463,10 +679,17 @@ const sampleCount =
     stableIndexes,
     segments,
     stableSampleCount: stableIndexes.length,
+    hasRotorSpeedData,
+    basis,
+    movedDuringRecording: basis === "activity" ? true : null,
     reason:
       stableIndexes.length > 0
-        ? "Stable governed-flight samples were detected."
-        : "No stable governed-flight segment passed the phase checks."
+        ? basis === "activity"
+          ? "Steady flight was detected from airframe motion, because this log contains no rotor-speed data."
+          : "Stable governed-flight samples were detected."
+        : basis === "activity"
+          ? "The airframe moved, but no single section was steady for long enough to measure."
+          : "No stable governed-flight segment passed the phase checks."
   };
 }
 
@@ -492,4 +715,161 @@ export function selectStableValues(
   }
 
   return selectedValues;
+}
+
+// ------------------------------------------------------
+// detectInFlightSamples — every sample where the rotor is
+// carrying the machine, hard maneuvers included.
+//
+// The stable phase deliberately drops spool-up, profile
+// transitions and heavy-load excursions — right for
+// averages, wrong for questions like "did the power
+// system ever run out". A hard load event pulls the rotor
+// off its plateau, so it removes itself from the stable
+// set at exactly the moment the question matters. This
+// mask keeps those moments: smoothed rotor speed above
+// 70% of its own 95th percentile.
+// ------------------------------------------------------
+export function detectInFlightSamples({ timeSeconds, headspeed }) {
+  if (!hasUsableRotorSpeed(headspeed)) {
+    return null;
+  }
+
+  const sampleRate = estimateSampleRate(timeSeconds) ?? 100;
+  const windowSamples = Math.max(3, Math.round(sampleRate * 2));
+
+  const smoothed = buildRollingMean(headspeed, windowSamples);
+  const p95 = getPercentile(smoothed, 0.95);
+
+  if (!Number.isFinite(p95) || p95 < 500) {
+    return null;
+  }
+
+  const threshold = p95 * 0.7;
+  const inFlightIndexes = [];
+
+  for (let index = 0; index < smoothed.length; index += 1) {
+    if (
+      Number.isFinite(smoothed[index]) &&
+      smoothed[index] >= threshold
+    ) {
+      inFlightIndexes.push(index);
+    }
+  }
+
+  return inFlightIndexes.length >= 100 ? inFlightIndexes : null;
+}
+
+// The flight envelope for LOAD-event selection: from the moment the
+// machine first settles into sustained stable flight to the last
+// stable sample. Spool-up crosses every rotor-speed threshold on its
+// way in, and the governor's first settling seconds run an elevated
+// output plateau that outranks any real flight moment — both live
+// before the first sustained stable segment, so the envelope starts
+// there. It deliberately does NOT require per-sample stability inside
+// the flight: a hard collective pump droops the rotor out of the
+// stable mask, and the hardest load moments are exactly what the
+// selection exists to find. A short stable brush (a settling
+// transient touching a bank for a second) is not "settled" — the
+// first segment must be sustained.
+export function qualifiedLoadEnvelope({
+  timeSeconds,
+  headspeed,
+  governorTarget
+}) {
+  const phase = detectStableFlightPhase({
+    timeSeconds,
+    headspeed: headspeed ?? [],
+    governorTarget: governorTarget ?? []
+  });
+
+  const segments = phase?.segments ?? [];
+  const stableIndexes = phase?.stableIndexes ?? [];
+
+  if (segments.length === 0 || stableIndexes.length === 0) {
+    return null;
+  }
+
+  const minimumSustainedSeconds = 5;
+
+  const sustained = segments.find((segment) => {
+    if (
+      !Number.isInteger(segment.startIndex) ||
+      !(segment.sampleCount > 1)
+    ) {
+      return false;
+    }
+
+    const first = timeSeconds[segment.startIndex];
+    const last =
+      timeSeconds[segment.startIndex + segment.sampleCount - 1];
+
+    return (
+      Number.isFinite(first) &&
+      Number.isFinite(last) &&
+      last - first >= minimumSustainedSeconds
+    );
+  });
+
+  if (!sustained) {
+    return null;
+  }
+
+  return {
+    startIndex: sustained.startIndex,
+    endIndex: stableIndexes[stableIndexes.length - 1]
+  };
+}
+
+// A logged governor target is only a TARGET if the rotor plausibly
+// chased it. Rotorflight's DIRECT mode (and FUNCTION throttle) logs
+// a govTarget column that is not a rotor-speed target at all — on
+// such flights it sits far below the measured headspeed, and every
+// governed-flight comparison built on it rejects a perfectly good
+// flight. The test is the ratio of in-flight medians: a real
+// governed rotor lives near its target; a passthrough number does
+// not. Implausible targets are treated as absent, which routes the
+// flight to the headspeed-only analysis it should have had.
+export function isUsableGovernorTarget(headspeed, governorTarget) {
+  if (
+    !Array.isArray(governorTarget) ||
+    !Array.isArray(headspeed) ||
+    !governorTarget.some((value) => Number(value) > 300)
+  ) {
+    return false;
+  }
+
+  const pairedRatios = [];
+
+  for (let index = 0; index < governorTarget.length; index += 1) {
+    const target = Number(governorTarget[index]);
+    const actual = Number(headspeed[index]);
+
+    if (
+      Number.isFinite(target) &&
+      Number.isFinite(actual) &&
+      target > 300 &&
+      actual > 500
+    ) {
+      pairedRatios.push(target / actual);
+    }
+  }
+
+  if (pairedRatios.length < 100) {
+    // Too little overlap to judge — keep the old behavior and let
+    // the sample-count guards downstream speak.
+    return true;
+  }
+
+  pairedRatios.sort((a, b) => a - b);
+  const medianRatio =
+    pairedRatios[Math.floor(pairedRatios.length / 2)];
+
+  // Asymmetric band: passthrough targets sit far BELOW the rotor
+  // (the reported DIRECT case reads 0.29), while a REAL target on a
+  // struggling machine sits ABOVE the rotor — sustained heavy droop
+  // pushes the ratio up, and blanking that target would hide
+  // exactly the failure it exposes. Up to 2× (a 50% droop median,
+  // beyond anything that stays airborne) the target is believed.
+  return medianRatio >= 0.7 && medianRatio <= 2.0;
 }
