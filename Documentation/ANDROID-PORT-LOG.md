@@ -110,6 +110,24 @@ reads on a real flight plus the awkward rows.
 
 **28s → 10s.**
 
+> **Superseded upstream, and rightly.** `fieldAt` shipped in this
+> fork at v0.3.7. Upstream reached the same measurement independently
+> and fixed it a level deeper: `analysis/columnTable.js` splits each
+> line **once** into a `Float64Array` per column, cached per lines
+> array in a `WeakMap` so the engine, the labs and the renderer share
+> one parse. `fieldAt` only made each read cheaper — it still rescanned
+> the row on every access. Upstream's header records the same profile
+> this log does ("decode 0.85 s, engine 25 s"), which is a useful
+> reassurance that both of us were looking at a real effect rather
+> than at our own instrumentation.
+>
+> The v1.8.0 merge therefore deletes `fieldAt` and
+> `test/fieldAt.test.mjs` and takes `columnTable.js` wholesale. The
+> section below is kept because the reasoning still holds and the
+> `""` vs `undefined` trap it describes is a live hazard for anyone
+> touching CSV field reads here — `columnTable` documents the same
+> distinction in its own header, having hit it too.
+
 A detail worth knowing: `buildColumnTable` in the renderer already
 existed to solve exactly this, with a comment saying so — but
 `alignedColumnValues`, immediately below it, bypassed it and
@@ -122,15 +140,28 @@ Ten seconds is ten seconds, and on the main thread the UI is dead for
 all of it — no spinner, no scrolling. So decode and analysis moved
 into `src/workers/analysisWorker.js`.
 
-This does not make it faster. It makes the app keep running: **over
-400 animation frames drawn during the load**, where before the whole
-thing was one unbroken stall. The smoke test asserts the longest
-frame gap, so a regression back onto the main thread fails CI.
+This does not make it faster. It makes the app keep running:
+**hundreds of animation frames drawn during the load** (246 on
+v1.8.0), where before the whole thing was one unbroken stall. The
+smoke test asserts the longest frame gap, so a regression back onto
+the main thread fails CI.
 
-What made it possible was that section 04 of `renderer.js` (~690
-lines) was pure computation with zero DOM references — verified
-before moving it, not assumed. It moved out to
-`analysis/datasetBuilder.js` unchanged.
+What made it possible was that section 04 of `renderer.js` was pure
+computation with zero DOM references — verified before moving it, not
+assumed. It moves out to `analysis/datasetBuilder.js` unchanged, and
+is re-extracted on each upstream merge rather than merged, because it
+is upstream's code living in a different file. After v1.8.0 it is
+~880 lines, and the extraction is checked line-for-line against their
+section 04: the only differences should be the four `export` keywords
+and the added `columnTable` field.
+
+**Moving analysis off the thread stopped being sufficient at
+v1.8.0.** Drawing the answer — replay, pack cards, the health record,
+several more labs — blocked the main thread for 3.2s on its own,
+while the worker sat idle. Two `requestAnimationFrame` yields in
+`analyzeFlight` break that into paintable pieces: longest stall
+3190ms → 1460ms, and the verdict appears at 4.2s instead of 9.2s
+because it is no longer trapped behind the labs in a single task.
 
 ---
 
@@ -199,7 +230,7 @@ and never exposed.
 
 Verified in the sandbox and on a GitHub runner:
 
-- 65 tests pass, including the `fieldAt` equivalence proof.
+- 475 tests pass (upstream's suite, after the v1.8.0 merge).
 - 18 smoke checks at Pixel 7 size: drawer, bridge, no horizontal
   overflow, an 8 MB log decoding to a rendered verdict, Compare
   Flights, and the UI staying responsive throughout.
@@ -241,11 +272,12 @@ Still unknown:
 - Whether touch zoom and the share sheet behave as documented.
 - Anything at phone size, on a phone.
 
-If memory is the thing that breaks, the fix is structural and already
-identified: stop round-tripping decoded frames through CSV text
-(`bbl/csvAdapter.js`). It would remove both the 42 MB of strings and
-most of the remaining parse cost, and would speed up the desktop app
-too.
+If memory is the thing that breaks, the fix is structural and half
+done. Upstream's `columnTable.js` removed the repeated parsing; what
+remains is the round-trip itself, where decoded frames are rendered
+to CSV text (`bbl/csvAdapter.js`) for every consumer to parse back.
+Removing that would drop the 42 MB of strings as well, and would
+speed up the desktop app too.
 
 ---
 
@@ -253,12 +285,16 @@ too.
 
 Commits are ordered so each is reviewable on its own:
 
-| commit | what |
-|---|---|
-| `5d1fa23` | Capacitor shell, mobile layout, platform bridge |
-| `5b2f3cb` | `fieldAt` — 28s → 10s |
-| `4092771` | CI, APK build, `ANDROID.md` |
-| `123b663` | The analysis worker |
+| commit | what | after v1.8.0 |
+|---|---|---|
+| `5d1fa23` | Capacitor shell, mobile layout, platform bridge | kept |
+| `5b2f3cb` | `fieldAt` — 28s → 10s | **dropped** — see above |
+| `4092771` | CI, APK build, `ANDROID.md` | kept |
+| `123b663` | The analysis worker | kept, plus render yields |
+
+The merge into upstream v1.8.0 is `e0e1fed`. Two of the five commits
+did not survive it, which is the honest outcome of a fork sitting
+still for 293 upstream commits.
 
 To rebuild any point in the history:
 

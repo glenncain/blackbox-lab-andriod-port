@@ -24,7 +24,7 @@ which obvious-looking approaches are already known to be wrong.
 ```
 npm install
 npm start                # Electron desktop app
-npm test                 # 65 tests, node --test
+npm test                 # 475 tests, node --test
 
 npm run build:web        # src/ + samples/ -> www/  (generated, gitignored)
 npm run android:sync     # build:web, then copy into android/
@@ -60,8 +60,8 @@ src/
     analysisWorker.js      Decode + analysis off the main thread
   analysis/
     analysisClient.js      Main thread's half of the worker, with in-place fallback
-    datasetBuilder.js      Was section 04 of renderer.js. Pure. Builds the dataset.
-    mathHelpers.js         fieldAt lives here — read its comment before touching it
+    datasetBuilder.js      Section 04 of renderer.js, re-extracted. Pure.
+    columnTable.js         Upstream's one-parse-per-log column cache
     bbl/                   Native .bbl decoder
     dsp/fft.js             FFT + Welch noise spectrum
   ui/
@@ -108,7 +108,19 @@ should cross as transferable `Float64Array` buffers, not plain arrays
 **Performance work belongs in `analysis/`, not the renderer.** The
 dominant remaining cost is that decoded frames are rendered to
 CSV-shaped text (`bbl/csvAdapter.js`) and every consumer parses it
-back. Profile before optimising: `node tools/profile-load.mjs`.
+back — `columnTable.js` removed the repeated parsing, not the
+round-trip. Profile before optimising: `node tools/profile-load.mjs`.
+
+**Rendering blocks too, not just analysis.** Drawing a v1.8.0 flight
+is over a second of main-thread work, so `analyzeFlight` yields twice
+with `requestAnimationFrame`. Adding a render phase without a yield
+brings the multi-second freeze back, and the smoke test will say so.
+
+**`datasetBuilder.js` is upstream's code in a different file.** On an
+upstream merge, re-extract section 04 rather than merging it: take
+their lines, add the four `export` keywords and the `columnTable`
+field, then diff the result against their section to prove nothing
+else changed.
 
 ---
 

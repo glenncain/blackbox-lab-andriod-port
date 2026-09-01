@@ -131,11 +131,15 @@ in a WebView. Profiling showed decoding was almost none of it:
 Analysis reads the log as CSV text. A telemetry row has ~40 columns,
 so `split(",")[i]` allocated 40 strings and discarded 39 — once per
 row, per column read, over 134,429 rows. Reading a single field
-directly instead (`fieldAt` in `mathHelpers.js`) brought the load
-down to **10 seconds**.
+directly instead brought the load down to **10 seconds**.
 
-That figure is from desktop-class hardware; expect a phone to be
-slower.
+Upstream then fixed it a level deeper, and this fork now uses their
+version: `analysis/columnTable.js` splits each line **once** into a
+`Float64Array` per column, cached per lines array, so the engine, the
+labs and the renderer share one parse instead of each re-reading.
+
+Those figures are from desktop-class hardware. A real Android tablet
+opens the same log in about 4 seconds.
 
 ### The analysis worker
 
@@ -172,7 +176,9 @@ Two details worth knowing:
 
 ### Still on the table
 
-**Stop round-tripping frames through CSV text.** `csvAdapter.js`
+**Stop round-tripping frames through CSV text.** `columnTable.js`
+removed the repeated parsing, but not the round-trip itself.
+`csvAdapter.js`
 exists so the analysis modules did not have to change when native
 `.bbl` decoding arrived — a reasonable trade then, and now the
 dominant remaining cost. Having analysis read frame objects directly
