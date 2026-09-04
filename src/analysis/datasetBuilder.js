@@ -6,38 +6,61 @@
 // draws from: decimated series, spectra, lab results and
 // the verdict.
 //
-// This was section 04 of renderer.js. It moved out intact,
-// unchanged, because it is pure computation over the log —
-// no DOM — which is exactly what lets it run inside a Web
-// Worker (src/workers/analysisWorker.js) and keep the main
-// thread free while a big log is analysed.
+// This is section 04 of renderer.js. It lives out here
+// because it is pure computation over the log — no DOM —
+// which is exactly what lets it run inside a Web Worker
+// (src/workers/analysisWorker.js) and keep the main thread
+// free while a big log is analysed.
+//
+// Keep it that way. One document reference in here and the
+// worker dies at load, on the phone only, with a message
+// that will not obviously point back at this file. The
+// palette comes from ui/chartColors.js rather than
+// ui/charts.js for exactly that reason: charts.js pulls in
+// uPlot, which needs a DOM.
 //
 // ======================================================
 
 import { CHART_COLORS } from "../ui/chartColors.js";
-import { getColumnValues, fieldAt } from "./mathHelpers.js";
-import { findTelemetryHeaderIndex } from "./telemetryHeader.js";
 import {
-  computeNoiseSpectrum,
-  estimateSampleRate
+  columnTableFor,
+  finiteColumnValues,
+  alignedColumnValues as alignedColumnValuesFromTable
+} from "./columnTable.js";
+import {
+  computeNoiseSpectrumOverRuns,
+  estimateSampleRate,
+  peakMagnitudeAbove
 } from "./dsp/fft.js";
-import { detectStableFlightPhase } from "./flightPhase.js";
-import { buildFlightVerdict } from "./flightVerdict.js";
-import { assessLogQuality } from "./logQuality.js";
-import { adviseFilters } from "./filterAdvisor.js";
-import { analyzeGovernorLab } from "./governorLabAnalysis.js";
-import { analyzeEscLab } from "./escLabAnalysis.js";
-import { analyzeBatteryLab } from "./batteryLabAnalysis.js";
-import { analyzeProfileResponse } from "./profilePidBreakdown.js";
 import {
-  sliceWindow,
-  windowStats,
-  findHighestLoadEvents,
-  explainLoadEvent,
-  isCollectiveDriven,
+  allConsecutiveRuns,
   groupByGovernorTarget,
   longestConsecutiveRun
 } from "./evidenceViews.js";
+import {
+  detectStableFlightPhase,
+  isUsableGovernorTarget
+} from "./flightPhase.js";
+import { assessLogQuality, columnCarriesData } from "./logQuality.js";
+import { getMetadataValue } from "./metadataReader.js";
+import { findTelemetryHeaderIndex } from "./telemetryHeader.js";
+import { buildFlightVerdict } from "./flightVerdict.js";
+import { adviseFilters } from "./filterAdvisor.js";
+import { analyzeGovernorLab } from "./governorLabAnalysis.js";
+import { analyzeEscLab } from "./escLabAnalysis.js";
+import {
+  analyzeBatteryLab,
+  chooseVoltageSource
+} from "./batteryLabAnalysis.js";
+import { analyzeSignalLab } from "./signalLabAnalysis.js";
+import { analyzeBecLab } from "./becLabAnalysis.js";
+import { analyzeServoLimits } from "./servoLimitAnalysis.js";
+import { analyzePrecomp } from "./precompAnalysis.js";
+import { detectGovernorEvents } from "./governorEvents.js";
+import { buildFlightEvents } from "./flightEvents.js";
+
+// 04. DATASET
+// ======================================================
 
 const UNFILTERED_GYRO_PATTERNS = [/^gyroUnfilt/i, /^gyroRAW/i];
 
@@ -89,27 +112,43 @@ function averageOf(values) {
 // Parse every data row exactly once. On big logs (100k+
 // frames) splitting the lines per column read costs seconds;
 // this table makes each column access instant.
+// Per-column finite values by (normalized) header name, read from
+// the shared column table — one parse for the engine, the labs and
+// this dataset. Same contents as the old per-row split loop: every
+// finite cell in row order, blanks (Number("") = 0) included.
 function buildColumnTable(lines, headerIndex) {
- const names = lines[headerIndex]
-  .split(",")
-  .map((name) =>
-    name
-      .trim()
-      .replace(/^"|"$/g, "")
-  );
-  const table = new Map(names.map((name) => [name, []]));
-  const columns = names.map((name) => table.get(name));
+  const names = lines[headerIndex]
+    .split(",")
+    .map((name) =>
+      name
+        .trim()
+        .replace(/^"|"$/g, "")
+    );
+  const table = new Map();
+  const indexesByName = new Map();
+  names.forEach((name, index) => {
+    if (!indexesByName.has(name)) indexesByName.set(name, []);
+    indexesByName.get(name).push(index);
+  });
 
-  for (let row = headerIndex + 1; row < lines.length; row += 1) {
-    const parts = lines[row].split(",");
-
-    for (let i = 0; i < columns.length; i += 1) {
-      const value = Number(parts[i]);
-
-      if (Number.isFinite(value)) {
-        columns[i].push(value);
+  for (const [name, indexes] of indexesByName) {
+    if (indexes.length === 1) {
+      table.set(name, finiteColumnValues(lines, headerIndex, indexes[0]));
+      continue;
+    }
+    // A duplicated header name (never in Rotorflight logs, possible
+    // in a hand-edited CSV): the old loop pushed every duplicate's
+    // finite cells into one array, row by row — kept verbatim.
+    const columnTable = columnTableFor(lines, headerIndex);
+    const columns = indexes.map((index) => columnTable.column(index));
+    const merged = [];
+    for (let row = headerIndex + 1; row < lines.length; row += 1) {
+      for (const column of columns) {
+        const value = column[row];
+        if (Number.isFinite(value)) merged.push(value);
       }
     }
+    table.set(name, merged);
   }
 
   return table;
@@ -125,19 +164,9 @@ export function buildDataset(lines, pidAnalysis) {
   const headerLine = lines[headerIndex];
   const columnTable = buildColumnTable(lines, headerIndex);
   const columnValues = (name) => columnTable.get(name) ?? [];
-  // Unlike columnTable, this keeps row alignment: a blank or
-  // unparseable cell becomes null rather than vanishing, so
-  // indexes still line up across columns. Memoized because
-  // several labs ask for the same column.
-  const alignedCache = new Map();
-
   const alignedColumnValues = (columnName) => {
   if (!columnName) {
     return [];
-  }
-
-  if (alignedCache.has(columnName)) {
-    return alignedCache.get(columnName);
   }
 
   const headers = headerLine
@@ -157,39 +186,12 @@ export function buildDataset(lines, pidAnalysis) {
     headers.indexOf(normalizedColumnName);
 
   if (columnIndex < 0) {
-    alignedCache.set(columnName, []);
     return [];
   }
 
-  const values = [];
-
-  for (
-    let rowIndex = headerIndex + 1;
-    rowIndex < lines.length;
-    rowIndex += 1
-  ) {
-    const rawValue =
-      fieldAt(lines[rowIndex], columnIndex)
-        ?.trim()
-        .replace(/^"|"$/g, "") ?? "";
-
-    if (rawValue === "") {
-      values.push(null);
-      continue;
-    }
-
-    const value = Number(rawValue);
-
-    values.push(
-      Number.isFinite(value)
-        ? value
-        : null
-    );
-  }
-
-  alignedCache.set(columnName, values);
-
-  return values;
+  // One value per row, null where the cell was blank or not numeric
+  // — from the shared table, not another pass over the text.
+  return alignedColumnValuesFromTable(lines, headerIndex, columnIndex);
 };
   const firstColumn = (patterns) => {
     const matches = findColumns(headerLine, patterns);
@@ -215,7 +217,17 @@ export function buildDataset(lines, pidAnalysis) {
   );
 
   const headspeed = firstColumn([/headspeed/i, /^rpm/i]);
-  const governorTarget = firstColumn([/governorTarget/i, /govTarget/i, /governor/i]);
+  const governorTargetRaw = firstColumn([/governorTarget/i, /govTarget/i, /governor/i]);
+  // DIRECT-mode / passthrough targets are not rotor-speed targets —
+  // treat them as absent so every consumer (labs, events, precomp,
+  // phase detection, verdict) falls back to headspeed-only reads.
+  // The Log Viewer still charts the raw column as recorded.
+  const governorTarget = isUsableGovernorTarget(
+    headspeed,
+    governorTargetRaw
+  )
+    ? governorTargetRaw
+    : [];
   const vbat = firstColumn([/^vbat/i]);
 const escVoltage = firstColumn([/^EscV$/i]);
 const amperage = firstColumn([/^amperage/i, /^Ibat/i, /^current/i]);
@@ -291,70 +303,72 @@ const spectrumFlightPhase =
       alignedGovernorTarget
   });
 
-const longestSpectrumSegment =
-  spectrumFlightPhase.segments
-    .filter(
-      (segment) =>
-        Number.isInteger(
-          segment.startIndex
-        ) &&
-        segment.sampleCount >=
-          fftWindowSize
-    )
-    .sort(
-      (first, second) =>
-        second.sampleCount -
-        first.sampleCount
-    )[0] ?? null;
+// The noise picture is averaged across EVERY stable run of the
+// flight, not read from one slice. A single window makes the
+// spectrum hostage to where the slice happens to land: an
+// intermittent shake scores very differently between two flights
+// of the same machine purely by window luck.
+const minimumSpectrumRun = 1024;
 
-const spectrumWindowStart =
-  longestSpectrumSegment
-    ? longestSpectrumSegment.startIndex +
-      Math.floor(
-        (
-          longestSpectrumSegment.sampleCount -
-          fftWindowSize
-        ) / 2
-      )
-    : null;
+const stableSpectrumRuns = (columnName) => {
+  if (!columnName) {
+    return [];
+  }
 
-const buildStableSpectrumSamples =
-  (columnName) => {
+  const values = alignedColumnValues(columnName);
+  const runs = [];
+
+  for (const segment of spectrumFlightPhase.segments ?? []) {
     if (
-      !Number.isInteger(
-        spectrumWindowStart
-      )
+      !Number.isInteger(segment.startIndex) ||
+      segment.sampleCount < minimumSpectrumRun
     ) {
-      return [];
+      continue;
     }
 
-    const values =
-      alignedColumnValues(columnName)
-        .slice(
-          spectrumWindowStart,
-          spectrumWindowStart +
-            fftWindowSize
-        );
+    const run = values.slice(
+      segment.startIndex,
+      segment.startIndex + segment.sampleCount
+    );
 
-    return (
-      values.length === fftWindowSize &&
-      values.every(Number.isFinite)
-    )
-      ? values
-      : [];
-  };
+    if (run.every(Number.isFinite)) {
+      runs.push(run);
+    }
+  }
+
+  return runs;
+};
+
+const hasSpectrumRuns = (
+  spectrumFlightPhase.segments ?? []
+).some(
+  (segment) =>
+    Number.isInteger(segment.startIndex) &&
+    segment.sampleCount >= minimumSpectrumRun
+);
 
 const spectra = [];
 
-if (
-  sampleRate &&
-  longestSpectrumSegment
-) {
+// When the chart cannot be drawn, the empty state must name the
+// actual gate that failed — telling a pilot with 300k gyro samples
+// that there is "not enough gyro data" contradicts the verdict
+// sitting right above the chart.
+let spectraUnavailableReason = null;
+
+if (gyroColumnNames.length === 0) {
+  spectraUnavailableReason = "no-gyro";
+} else if (!sampleRate) {
+  spectraUnavailableReason = "no-rate";
+} else if (!hasSpectrumRuns) {
+  spectraUnavailableReason = "no-stable-run";
+}
+
+if (sampleRate && hasSpectrumRuns) {
   gyroColumnNames.forEach(
     (name, index) => {
       const spectrum =
-        computeNoiseSpectrum(
-          buildStableSpectrumSamples(name),
+        computeNoiseSpectrumOverRuns(
+          stableSpectrumRuns(name),
           sampleRate,
           {
             segmentSize: fftWindowSize
@@ -378,9 +392,43 @@ if (
 
  
 
-  const governedHeadspeed = headspeed
-    ? averageOf(headspeed.slice(-Math.floor(headspeed.length / 3)))
-    : null;
+  // Anchor rotor-harmonic classification to the rotor speed the
+  // machine actually flew at. The stable-flight samples are the
+  // authority; the tail-of-log average is only a fallback for logs
+  // with no detectable stable phase, because ground idle and
+  // spool-down in the tail drag that average away from flight rpm
+  // and shift every harmonic ratio with it.
+  const stableMeanHeadspeed = (() => {
+    const indexes = spectrumFlightPhase.stableIndexes ?? [];
+
+    if (!alignedHeadspeed || indexes.length < 100) {
+      return null;
+    }
+
+    let sum = 0;
+    let count = 0;
+
+    for (const index of indexes) {
+      const value = alignedHeadspeed[index];
+
+      if (Number.isFinite(value) && value > 0) {
+        sum += value;
+        count += 1;
+      }
+    }
+
+    return count >= 100 ? sum / count : null;
+  })();
+
+  const governedHeadspeed =
+    stableMeanHeadspeed ??
+    (headspeed
+      ? averageOf(headspeed.slice(-Math.floor(headspeed.length / 3)))
+      : null);
+
+  if (spectra.length === 0 && spectraUnavailableReason === null) {
+    spectraUnavailableReason = "no-stable-run";
+  }
 
   const markers = buildSpectrumMarkers(spectra, governedHeadspeed);
 
@@ -399,13 +447,7 @@ if (
   let strongestValue = 0;
 
   spectra.forEach((entry, index) => {
-    let peak = 0;
-
-    for (const value of entry.spectrum.magnitudes) {
-      if (value > peak) {
-        peak = value;
-      }
-    }
+    const peak = spectrumPeakValue(entry.spectrum);
 
     if (peak > strongestValue) {
       strongestValue = peak;
@@ -418,10 +460,8 @@ if (
     filteredColumns[0];
 
   filteredSpectrumStrongest =
-    computeNoiseSpectrum(
-      buildStableSpectrumSamples(
-        filteredName
-      ),
+    computeNoiseSpectrumOverRuns(
+      stableSpectrumRuns(filteredName),
       sampleRate,
       {
         segmentSize: fftWindowSize
@@ -437,8 +477,8 @@ if (
 
     for (const entry of spectra) {
       if (
-        Math.max(...entry.spectrum.magnitudes) >
-        Math.max(...strongest.spectrum.magnitudes)
+        spectrumPeakValue(entry.spectrum) >
+        spectrumPeakValue(strongest.spectrum)
       ) {
         strongest = entry;
       }
@@ -486,26 +526,29 @@ if (
     const filteredName =
       filteredColumns[strongestAxisIndex] ?? filteredColumns[0];
 
-    const bankWindowSamples = (columnName, startIndex) => {
+    // A bank's spectrum averages across all of its stable runs,
+    // matching the flight-wide spectra: one slice per bank made
+    // the per-bank story hostage to where that slice landed.
+    const bankRunSamples = (columnName, runs) => {
       if (!columnName) {
         return [];
       }
 
-      const values = alignedColumnValues(columnName).slice(
-        startIndex,
-        startIndex + fftWindowSize
-      );
+      const values = alignedColumnValues(columnName);
 
-      return values.length === fftWindowSize &&
-        values.every(Number.isFinite)
-        ? values
-        : [];
+      return runs
+        .filter((run) => run.length >= minimumSpectrumRun)
+        .map((run) =>
+          values.slice(run.startIndex, run.startIndex + run.length)
+        )
+        .filter((run) => run.every(Number.isFinite));
     };
 
     return banks.map((bank) => {
-      const run = longestConsecutiveRun(bank.indexes);
+      const runs = allConsecutiveRuns(bank.indexes);
+      const longestRun = longestConsecutiveRun(bank.indexes);
 
-      if (!run || run.length < fftWindowSize) {
+      if (!longestRun || longestRun.length < minimumSpectrumRun) {
         return {
           targetRpm: bank.targetRpm,
           stableSampleCount: bank.indexes.length,
@@ -513,12 +556,8 @@ if (
         };
       }
 
-      const windowStart =
-        run.startIndex +
-        Math.floor((run.length - fftWindowSize) / 2);
-
-      const unfilteredSpectrum = computeNoiseSpectrum(
-        bankWindowSamples(unfilteredName, windowStart),
+      const unfilteredSpectrum = computeNoiseSpectrumOverRuns(
+        bankRunSamples(unfilteredName, runs),
         sampleRate,
         { segmentSize: fftWindowSize }
       );
@@ -532,22 +571,30 @@ if (
       }
 
       const filteredSpectrum = hasOwnUnfiltered(headerLine)
-        ? computeNoiseSpectrum(
-            bankWindowSamples(filteredName, windowStart),
+        ? computeNoiseSpectrumOverRuns(
+            bankRunSamples(filteredName, runs),
             sampleRate,
             { segmentSize: fftWindowSize }
           )
         : null;
 
-      const bankHeadspeed = windowStats(
-        alignedHeadspeed,
-        windowStart,
-        windowStart + fftWindowSize - 1
-      );
+      // The bank's rpm is read over its whole stable set, not a
+      // single window, to match the spectra.
+      const bankRpm = (() => {
+        let sum = 0;
+        let count = 0;
 
-      const bankRpm = bankHeadspeed
-        ? bankHeadspeed.average
-        : bank.targetRpm;
+        for (const index of bank.indexes) {
+          const value = Number(alignedHeadspeed[index]);
+
+          if (Number.isFinite(value) && value > 0) {
+            sum += value;
+            count += 1;
+          }
+        }
+
+        return count > 0 ? sum / count : bank.targetRpm;
+      })();
 
       return {
         targetRpm: bank.targetRpm,
@@ -579,9 +626,33 @@ if (
     });
   })();
 
+  // One voltage-source decision for every chart and readout: the
+  // same cross-check the Labs use (FC's calibrated reading wins on
+  // real disagreement), so a chart never contradicts the story
+  // beside it.
+  const voltagePatterns =
+    chooseVoltageSource(escVoltage, vbat).selected === escVoltage
+      ? [/^EscV$/i, /^vbatLatest$/i]
+      : [/^vbat/i, /^vbatLatest$/i];
+
   // ---- labs + verdict ----
+  const motorOutputForGovernor =
+    Array.isArray(escThrottle) &&
+    escThrottle.some((value) => Number(value) > 0)
+      ? escThrottle
+      : motor;
+
+  const collective = firstColumn([/^setpoint\[3\]$/i]);
+
   const labs = {
-    governor: analyzeGovernorLab({ timeSeconds, headspeed, governorTarget }),
+    governor: analyzeGovernorLab({
+      timeSeconds,
+      headspeed,
+      governorTarget,
+      // Output context for the worst-droop event: a dip with the
+      // throttle at its ceiling is a power limit, not a gain issue.
+      motorOutput: motorOutputForGovernor
+    }),
    esc: analyzeEscLab({
   timeSeconds,
   motor,
@@ -604,13 +675,72 @@ if (
 })
   };
 
+  // Radio-link and receiver-power health, computed before the
+  // verdict so Home can carry their cards. The BEC lab reads the
+  // Signal lab's conclusion: a "brownout" on the voltage trace
+  // while the receiver demonstrably kept flying is a
+  // measurement-path story, not a power-loss story.
+  const servoColumnsForLabs = findColumns(headerLine, [
+    /^servo\[\d\]$/i
+  ]).map((name) => ({ name, values: columnValues(name) }));
+
+  const signalLab = analyzeSignalLab({
+    timeSeconds,
+    rssi: firstColumn([/^rssi$/i]),
+    failsafePhase: firstColumn([/^failsafePhase$/i]),
+    rxSignalReceived: firstColumn([/^rxSignalReceived$/i]),
+    rxFlightChannelsValid: firstColumn([/^rxFlightChannelsValid$/i]),
+    headspeed
+  });
+
+  const becLab = analyzeBecLab({
+    timeSeconds,
+    vbec: firstColumn([/^Vbec$/i]),
+    servos: servoColumnsForLabs,
+    headspeed,
+    receiverStayedAlive: signalLab
+      ? signalLab.counts.failsafe === 0 &&
+        signalLab.counts.linkLoss === 0
+      : null
+  });
+
+  // What this log can and cannot tell — decided ONCE, here, and
+  // read by the verdict cards, the first steps and the quality
+  // chips alike. A missing or dead channel is a fact every surface
+  // states; none of them re-derives it.
+  const columnPresence = {
+    hasUnfilteredGyro: unfilteredColumns.length > 0,
+    hasFilteredGyro: filteredColumns.length > 0,
+    hasHeadspeed: columnCarriesData(headspeed),
+    hasGovernorTarget: columnCarriesData(governorTarget),
+    hasVbat: columnCarriesData(vbat) || columnCarriesData(escVoltage),
+    hasAmperage:
+      columnCarriesData(amperage) || columnCarriesData(escCurrent),
+    // The labs already decided what their telemetry supports —
+    // the chips repeat that decision, never re-derive it.
+    hasRssi: signalLab?.capability === "full",
+    hasLinkFlags: Boolean(signalLab),
+    hasVbec: Boolean(becLab)
+  };
+
+  const quality = assessLogQuality({
+    sampleRateHz: sampleRate,
+    durationSeconds: timeSeconds[timeSeconds.length - 1],
+    ...columnPresence
+  });
+
   const verdict = buildFlightVerdict({
   spectra,
   headspeed,
   governorTarget,
   vbat,
   pidAnalysis,
-  labs
+  labs,
+  anchorHeadspeedRpm: governedHeadspeed,
+  filterAdvice,
+  signalLab,
+  becLab,
+  capabilities: quality.capabilities
 });
 
   // Evidence that zooms to the moment: attach a focus
@@ -634,67 +764,112 @@ if (
   }
 
   return {
+    // Which helicopter this flight came from. A before/after
+    // comparison is only a before/after when both are the same
+    // machine; otherwise the difference is the aircraft.
+    craftName: getMetadataValue(lines, "Craft name"),
     pidScore: Number.isFinite(pidAnalysis?.score) ? pidAnalysis.score : null,
+    // Carried so a comparison can say how much each side's score rests
+    // on. Two tracking numbers are only worth subtracting when both
+    // were measured from enough clean responses to mean anything.
+    pidConfidence: pidAnalysis?.confidence ?? null,
+    // Per-axis commanded-rate magnitudes: the stick demand a flight
+    // asked for, so Compare can match flights on what they asked.
+    demandRates:
+      pidAnalysis?.technicalSummary?.demand?.axisSetpointMagnitudes ?? null,
+    // Clean command-response counts per axis — a comparison is only a
+    // comparison where both flights interrogated the same axes (#32).
+    axisEvidence: Object.fromEntries(
+      (pidAnalysis?.detectedColumns?.trackingAnalysis?.commandEvents ?? []).map(
+        (axisResult) => [
+          axisResult.axis,
+          (axisResult.events ?? []).filter((event) =>
+            Number.isFinite(event.responsePeak)
+          ).length
+        ]
+      )
+    ),
     batterySagPercent: labs.battery ? labs.battery.sagPercent : null,
     filterAdvice,
     sampleRateHz: sampleRate,
-    columnPresence: {
-      hasUnfilteredGyro: unfilteredColumns.length > 0,
-      hasFilteredGyro: filteredColumns.length > 0,
-      hasHeadspeed: Boolean(headspeed),
-      hasGovernorTarget: Boolean(governorTarget),
-      hasVbat: Boolean(vbat),
-      hasAmperage: Boolean(amperage)
-    },
+    // "Present" means CARRIES DATA: a headspeed column logged as
+    // constant zero (RPM wire unplugged) must not promise governor
+    // analysis, title a chart "vs Target", or mark a craft
+    // electric. 16 % of contributed flights carry at least one
+    // such dead column.
+    columnPresence,
+    quality,
     headerLine,
-    // Carried so the dataset can cross a worker boundary:
-    // columnValues and findColumnsIn are closures and cannot be
-    // cloned, but they can be rebuilt from these two on the
-    // other side. See attachDatasetAccessors below.
+    // Carried for the worker: structured clone drops the two
+    // closures below, and attachDatasetAccessors rebuilds them
+    // from this Map and headerLine on the far side.
     columnTable,
     timeSeconds,
     columnValues,
     findColumnsIn: (patterns) => findColumns(headerLine, patterns),
     headspeed,
     governorTarget,
+    collective,
     vbat,
+    voltagePatterns,
     amperage,
     spectra,
+    spectraUnavailableReason,
     markers,
     perBankFilter,
     labs,
+    // The Governor Lab's event layer: sustained over/under-target
+    // excursions with their context, measured by the analysis
+    // module on the same arrays the lab charts read.
+    governorEvents: detectGovernorEvents({
+      timeSeconds,
+      headspeed,
+      governorTarget,
+      motorOutput: motorOutputForGovernor,
+      collective
+    }),
+    // How the anticipation worked: collective transients against
+    // headspeed error (governor precomp) and yaw error (tail
+    // torque precomp).
+    precomp: analyzePrecomp({
+      timeSeconds,
+      headspeed,
+      governorTarget,
+      collective,
+      yawSetpoint: firstColumn([/^setpoint\[2\]$/i]),
+      yawGyro: firstColumn([/^gyroADC\[2\]$/i])
+    }),
+    signalLab,
+    becLab,
+    // Servo commands frozen at their own travel edge — the
+    // second layer that confirms whether a saturation condition
+    // reached the actual servo command.
+    servoLimits: analyzeServoLimits({
+      timeSeconds,
+      headspeed,
+      servos: findColumns(headerLine, [/^servo\[\d\]$/i]).map(
+        (name) => ({ name, values: columnValues(name) })
+      )
+    }),
+    // The stick-command event layer lives ON the dataset so every
+    // consumer — the PID page, Compare Flights, contributions —
+    // reads the same list.
+    flightEvents: buildFlightEvents({
+      trackingAnalysis:
+        pidAnalysis?.detectedColumns?.trackingAnalysis,
+      timeSeconds,
+      dataRowOffset: headerIndex + 1
+    }),
     verdict
   };
 }
 
-// Puts back the two accessors that structured clone drops.
-// A dataset that arrives from the analysis worker has its
-// columnTable and headerLine but no functions; this makes it
-// indistinguishable from one built in place.
-export function attachDatasetAccessors(dataset) {
-  if (!dataset || typeof dataset.columnValues === "function") {
-    return dataset;
-  }
-
-  const table = dataset.columnTable ?? new Map();
-  const headerLine = dataset.headerLine ?? "";
-
-  dataset.columnValues = (name) => table.get(name) ?? [];
-  dataset.findColumnsIn = (patterns) => findColumns(headerLine, patterns);
-
-  return dataset;
-}
-
+// "Strongest" always means strongest ABOVE the vibration floor:
+// a plain max is dominated by near-DC maneuver energy and elects
+// the most-flown axis, while the verdict names its peak from the
+// most-shaking one — and the two must never disagree.
 export function spectrumPeakValue(spectrum) {
-  let peak = 0;
-
-  for (const value of spectrum.magnitudes) {
-    if (value > peak) {
-      peak = value;
-    }
-  }
-
-  return peak;
+  return peakMagnitudeAbove(spectrum);
 }
 
 export function buildSpectrumMarkers(spectra, headspeedRpm) {
@@ -740,15 +915,57 @@ export function buildSpectrumMarkers(spectra, headspeedRpm) {
 
   return chosen.map((peak) => {
     let name = `${peak.hz.toFixed(0)} Hz`;
+    let classification = "unclassified";
 
     if (headspeedRpm && headspeedRpm > 300) {
       const ratio = peak.hz / (headspeedRpm / 60);
 
-      if (Math.abs(ratio - 1) < 0.15) name = `main rotor 1/rev · ${name}`;
-      else if (Math.abs(ratio - 2) < 0.2) name = `main rotor 2/rev · ${name}`;
-      else if (ratio > 3.5 && ratio < 6.5) name = `tail region · ${name}`;
+      if (Math.abs(ratio - 1) < 0.15) {
+        name = `main rotor 1/rev · ${name}`;
+        classification = "main_rotor_1rev";
+      } else if (Math.abs(ratio - 2) < 0.2) {
+        name = `main rotor 2/rev · ${name}`;
+        classification = "main_rotor_2rev";
+      } else if (ratio > 3.5 && ratio < 6.5) {
+        name = `tail region · ${name}`;
+        classification = "tail_region";
+      }
     }
 
-    return { hz: peak.hz, label: name };
+    return {
+      hz: peak.hz,
+      label: name,
+      magnitude: peak.magnitude,
+      classification
+    };
   });
+}
+
+// ======================================================
+
+// ======================================================
+// STRUCTURED CLONE REPAIR
+// ======================================================
+//
+// A dataset that crosses back from the worker has lost its
+// two closures — structured clone carries data, not
+// functions. columnTable (a Map) and headerLine do survive,
+// so both are rebuilt here from the same values they closed
+// over, and every consumer sees the dataset it expects
+// whether the analysis ran in the worker or in place.
+//
+// ======================================================
+
+export function attachDatasetAccessors(dataset) {
+  if (!dataset || typeof dataset.columnValues === "function") {
+    return dataset;
+  }
+
+  const table = dataset.columnTable ?? new Map();
+  const headerLine = dataset.headerLine ?? "";
+
+  dataset.columnValues = (name) => table.get(name) ?? [];
+  dataset.findColumnsIn = (patterns) => findColumns(headerLine, patterns);
+
+  return dataset;
 }

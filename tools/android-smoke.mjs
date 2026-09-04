@@ -37,6 +37,21 @@ const context = await browser.newContext({
   ...devices["Pixel 7"]
 });
 
+// v1.8.0 asks, on first run, whether to share anonymized logs. The
+// dialog is modal and eats the taps below, so answer it the way a
+// test must: decline, and leave the app's own state untouched
+// otherwise. Seeded before any script runs, so it never appears.
+const DECLINE_CONTRIBUTE = () => {
+  try {
+    localStorage.setItem("blackboxLabContribute", "off");
+  } catch {
+    // A context with storage disabled still shows the dialog; the
+    // click fallback below covers it.
+  }
+};
+
+await context.addInitScript(DECLINE_CONTRIBUTE);
+
 const page = await context.newPage();
 
 const problems = [];
@@ -247,6 +262,7 @@ check(
 // in CI exercises it. Removing Worker reproduces that here.
 
 const noWorker = await browser.newContext({ ...devices["Pixel 7"] });
+await noWorker.addInitScript(DECLINE_CONTRIBUTE);
 const fallbackPage = await noWorker.newPage();
 
 await fallbackPage.addInitScript(() => {
@@ -304,6 +320,7 @@ const desktop = await browser.newContext({
   viewport: { width: 1280, height: 900 }
 });
 
+await desktop.addInitScript(DECLINE_CONTRIBUTE);
 const desktopPage = await desktop.newPage();
 await desktopPage.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "load" });
 await desktopPage.waitForTimeout(400);

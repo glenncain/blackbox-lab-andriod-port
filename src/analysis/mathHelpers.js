@@ -1,30 +1,8 @@
-// Reads one comma-separated field without splitting the whole
-// line. A telemetry row has ~40 columns, so split(",")[i] throws
-// away 39 freshly allocated strings every time it is called — and
-// on a 134k-frame log, once per row per column read. That is the
-// single biggest cost in analysing a large flight.
-//
-// Returns undefined when the row has fewer fields than asked for,
-// exactly as split(",")[i] does, so Number() still yields NaN.
-export function fieldAt(line, index) {
-  let start = 0;
-
-  for (let i = 0; i < index; i += 1) {
-    const next = line.indexOf(",", start);
-
-    if (next < 0) {
-      return undefined;
-    }
-
-    start = next + 1;
-  }
-
-  const end = line.indexOf(",", start);
-
-  return end < 0
-    ? line.slice(start)
-    : line.slice(start, end);
-}
+import {
+  finiteColumnValues,
+  finiteValuesAtRows,
+  columnTableFor
+} from "./columnTable.js";
 
 export function getColumnValues(
   lines,
@@ -49,21 +27,7 @@ export function getColumnValues(
     return [];
   }
 
-  const values = [];
-
-  for (
-    let rowIndex = headerIndex + 1;
-    rowIndex < lines.length;
-    rowIndex += 1
-  ) {
-    const value = Number(fieldAt(lines[rowIndex], columnIndex));
-
-    if (Number.isFinite(value)) {
-      values.push(value);
-    }
-  }
-
-  return values;
+  return finiteColumnValues(lines, headerIndex, columnIndex);
 }
 
 export function getColumnSamples(
@@ -90,13 +54,18 @@ export function getColumnSamples(
   }
 
   const samples = [];
+  const column = columnTableFor(lines, headerIndex)?.column(columnIndex);
+
+  if (!column) {
+    return samples;
+  }
 
   for (
     let rowIndex = headerIndex + 1;
     rowIndex < lines.length;
     rowIndex += 1
   ) {
-    const value = Number(fieldAt(lines[rowIndex], columnIndex));
+    const value = column[rowIndex];
 
     if (Number.isFinite(value)) {
       samples.push({
@@ -192,20 +161,6 @@ export function getColumnValuesByRowIndexes(
     return [];
   }
 
-  return rowIndexes
-    .map((rowIndex) => {
-      const line = lines[rowIndex];
-
-      if (!line) {
-        return null;
-      }
-
-      const value = Number(fieldAt(line, columnIndex));
-
-      return Number.isFinite(value)
-        ? value
-        : null;
-    })
-    .filter((value) => Number.isFinite(value));
+  return finiteValuesAtRows(lines, headerIndex, columnIndex, rowIndexes);
 }
   

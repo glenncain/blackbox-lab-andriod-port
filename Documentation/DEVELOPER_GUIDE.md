@@ -1,48 +1,64 @@
 # Blackbox Lab — Developer Guide
 
-Written for Daniel — a tour of what's inside after the v0.2
-elevation, and how to keep building on it (with or without an AI
-assistant at your side).
+A tour of what's inside, and how to keep building on it.
 
 ## The big picture
 
 ```
 src/
-  index.js            Electron main process (window creation)
+  index.js            Electron main process (windows, PDF export, IPC)
   preload.js          Electron preload
   index.html          All screens (one <section data-screen> each)
   index.css           Styling
   renderer.js         Wires everything: file → decode → analyze → draw
-  platform/           NEW (Android port)
+  version.js          APP_VERSION + the startup update check
+  platform/           Android port
     bridge.js         window.blackboxLab when Electron's preload has not run
     mobile.js         Nav drawer + Android file-picker widening
-  workers/            NEW (Android port)
-    analysisWorker.js decode + analysis off the main thread
+  workers/            Android port
+    analysisWorker.js Decode + analysis off the main thread
   ui/
     navigation.js     Sidebar ⇄ screen switching
     charts.js         uPlot wrappers (time series + spectrum)
-    chartColors.js    NEW: palette, split out so the worker can use it
-    screenUpdater.js  Your original results renderer (untouched)
+    chartColors.js    Palette, split out so the worker can use it
+    screenUpdater.js  Results renderer
+    replayFields.js   Replay's searchable field browser
+    stickDisplay.js   Stick-position overlays
+    reportBuilder.js  The PDF report (same wording as the app)
   analysis/
-    ...               Your original analysis modules (untouched)
-    analysisClient.js NEW: talks to the worker, falls back in place
-    datasetBuilder.js NEW: was section 04 of renderer.js, moved out intact
-    bbl/              native binary .bbl decoder
+    logAnalysisBuilder.js   One decoded flight → every lab's results
+    columnTable.js          One CSV parse into typed columns (speed)
+    analysisClient.js       Talks to the worker, falls back in place
+    datasetBuilder.js       Section 04 of renderer.js, moved out DOM-free
+    flightEvents.js         Stick commands + measured responses
+    recommendationEngine.js What To Try Next (evidence-gated)
+    recommendationContract.js  One priority rule for every surface
+    packBuilder.js / packSnippet.js  Change Packs + CLI snippets
+    compareFlights.js / demandSignature.js  Like-for-like comparison
+    craftHistory.js         The Health Record
+    crossAxisAnalysis.js / profileSegments.js  Cross-axis, per-profile
+    …one module per lab (filter, pid, governor, esc, battery,
+    signal, bec, servo, telemetry) plus their events/scoring helpers
+    bbl/              Native binary .bbl decoder
       byteStream.js     encodings (VB, zigzag, TAG groups)
       headerParser.js   header lines → field definitions
       frameDecoder.js   frames + predictors + corruption resync
       bblDecoder.js     whole files → decoded flights
-      csvAdapter.js     decoded flight → CSV-shaped lines
+      csvAdapter.js     decoded flight → CSV-shaped lines + column table
     dsp/
       fft.js          FFT + Welch noise spectrum
+  contribute/         Anonymized log sharing (consent-gated;
+                      see Documentation/CONTRIBUTED-DATA.md),
+                      including the ingest worker source
+  profiles/           Craft profile storage
+  vendor/             uPlot (vendored, MIT-licensed)
 scripts/
   build-web.mjs           src/ + samples/ → www/ for the Android build
 tools/
-  generateSampleLog.mjs   synthetic test flights (known truth)
-  ui-smoke.cjs            drives the real Electron app
-  android-smoke.mjs       drives the web build at phone size
+  generateSampleLog.mjs   Synthetic test flights (known truth)
+  android-smoke.mjs       Drives the web build at phone size
   profile-load.mjs        CPU profile of opening a log
-samples/                  three ready-made .bbl flights
+samples/                  Ready-made .bbl flights incl. the Academy set
 android/                  Capacitor project (committed)
 test/                     run with: npm test
 ```
@@ -50,15 +66,22 @@ test/                     run with: npm test
 The Android port is documented separately: `ANDROID.md` for how it
 works, `ANDROID-PORT-LOG.md` for why it is built that way.
 
-## The key design decision
+## The key design decisions
 
-The decoder does NOT feed the analysis directly. It renders each
-decoded flight into the same CSV-shaped lines your modules always
-consumed (`csvAdapter.js`). That means:
-
-- every analysis module you wrote works on raw .bbl files today,
-- you can keep writing analysis against the familiar CSV shape,
-- if the decoder ever misbehaves, CSV files still work as before.
+- **The decoder does not feed the analysis directly.** Each decoded
+  flight is rendered into the same CSV-shaped lines the analysis
+  modules have always consumed (`csvAdapter.js`), which also
+  registers a typed column table for the fast path. Analysis code
+  stays format-agnostic; CSV files still work as before.
+- **Calibration is measured, never guessed.** Every threshold that
+  flags a flight is anchored to percentiles of the contributed
+  fleet; the comment above each bar says what was measured and when.
+- **One priority rule.** `recommendationContract.js` ranks findings
+  once; Home, the Change Pack, the labs, Technical and the PDF all
+  consume the same ranking, so no surface contradicts another.
+- **Evidence gates speech.** A card that cannot cite events,
+  confidence and (where relevant) the verifying metric for the next
+  flight stays silent or says what is missing.
 
 ## How the binary decoder works (short version)
 
@@ -68,21 +91,19 @@ expect) and an ENCODING (how the difference is stored). Decoding
 reverses both: read the encoded delta, add the prediction.
 Intraframes ("I") anchor the stream; interframes ("P") build on
 the previous two frames; corrupt bytes are skipped by scanning to
-the next plausible frame marker (see `frameDecoder.js`).
+the next plausible frame marker (see `frameDecoder.js`). It was
+implemented clean-room from the published Blackbox format
+specification. The whole project is GPL-3.0 (see LICENSE).
 
-It was implemented clean-room from the published Blackbox format
-specification — no GPL code was copied, so your MIT license
-stays clean.
+## Working on the code
 
-## Working on this with an AI assistant
-
-- Point it at ONE module and its test file — small, precise asks
-  beat "improve the app".
-- `npm test` after every change; the decoder tests catch format
-  regressions instantly.
-- The generator is your friend: plant a known problem in a
-  sample flight, then ask whether the analysis finds it.
-- Keep your idiom: ES modules, descriptive names, one module per
+- Point yourself (or your AI assistant) at ONE module and its test
+  file — small, precise changes beat "improve the app".
+- `npm test` after every change; the decoder and calibration tests
+  catch regressions instantly.
+- The generator is your friend: plant a known problem in a sample
+  flight, then check whether the analysis finds it.
+- Keep the idiom: ES modules, descriptive names, one module per
   concern, section banners.
 
 ## Adding a new Lab (recipe)
@@ -94,8 +115,12 @@ stays clean.
 3. Call it from `logAnalysisBuilder.js`, render results in
    `screenUpdater.js`, add charts via `ui/charts.js`.
 4. Add a test in `test/` using the sample generator.
+5. Wire the lab into the verdict/priority surfaces
+   (`flightVerdict.js`, `recommendationContract.js`) so its
+   findings rank with everyone else's.
 
 ## Releases
 
 `npm run make` builds installers via Electron Forge. CI runs the
-test suite on every push (`.github/workflows/ci.yml`).
+test suite on every push (`.github/workflows/ci.yml`); tagged
+releases build the platform installers.

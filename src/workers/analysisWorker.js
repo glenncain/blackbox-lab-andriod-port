@@ -103,7 +103,8 @@ function analyze(id, flightIndex) {
     extraSummary,
     telemetryText,
     filterAnalysis,
-    pidAnalysis
+    pidAnalysis,
+    profileSegments
   } = buildLogAnalysis({
     fileType: loadedLog.fileType,
     lines: flight.lines,
@@ -122,6 +123,7 @@ function analyze(id, flightIndex) {
       telemetryText,
       filterAnalysis,
       pidAnalysis,
+      profileSegments,
       dataset
     },
     buffers

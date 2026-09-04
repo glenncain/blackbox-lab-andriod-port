@@ -1,7 +1,7 @@
 {
   "name": "blackbox-lab",
   "productName": "Blackbox Lab",
-  "version": "0.3.7",
+  "version": "1.8.0",
   "description": "Rotorflight Blackbox analysis suite — simple first, deeper when you want it.",
   "main": "src/index.js",
   "private": true,
@@ -32,7 +32,7 @@
     "name": "hillbilly1975",
     "email": "dlsinkjr22@gmail.com"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@capacitor/android": "^7.6.8",
     "@capacitor/browser": "^7.0.5",

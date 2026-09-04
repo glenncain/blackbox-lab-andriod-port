@@ -11,8 +11,10 @@
 // ======================================================
 
 import {
-  detectStableFlightPhase
+  detectStableFlightPhase,
+  detectInFlightSamples
 } from "./flightPhase.js";
+import { chooseVoltageSource } from "./batteryLabAnalysis.js";
 
 function statsOf(values) {
   if (!Array.isArray(values) || values.length === 0) {
@@ -86,26 +88,33 @@ export function analyzeEscLab({
   headspeed,
   governorTarget
 }) {
+    // A current channel must CARRY data to be a source: an all-zero
+    // EscI falling back to an all-zero Ibat still measures nothing,
+    // and nothing must never be displayed as 0.0 A (#34).
     const selectedAmperage =
     hasUsablePositiveData(escCurrent)
       ? escCurrent
-      : amperage;
+      : hasUsablePositiveData(amperage)
+        ? amperage
+        : null;
 
-  const selectedVoltage =
-    hasUsablePositiveData(escVoltage)
-      ? escVoltage
-      : vbat;
+  const { selected: selectedVoltage, note: voltageSourceNote } =
+    chooseVoltageSource(escVoltage, vbat);
 
   const selectedOutput =
     hasUsablePositiveData(escThrottle)
       ? escThrottle
       : motor;
 
+  // A governor target sharpens the stable-phase search but is
+  // not required for it: models on an ESC or external governor
+  // log rotor speed with no target to compare it against, and
+  // the phase detector falls back to headspeed on its own. Only
+  // the data this Lab actually reads may bound the sample count.
   const sampleCount = Math.min(
     timeSeconds?.length ?? 0,
     selectedOutput?.length ?? 0,
-    headspeed?.length ?? 0,
-    governorTarget?.length ?? 0
+    headspeed?.length ?? 0
   );
 
   if (sampleCount < 200) {
@@ -121,7 +130,9 @@ export function analyzeEscLab({
     headspeed.slice(0, sampleCount);
 
   const alignedTarget =
-    governorTarget.slice(0, sampleCount);
+    Array.isArray(governorTarget)
+      ? governorTarget.slice(0, sampleCount)
+      : [];
 
   const alignedAmperage =
     Array.isArray(selectedAmperage)
@@ -202,6 +213,42 @@ export function analyzeEscLab({
 
   const saturationPercent =
     (saturatedSamples / stableMotor.length) * 100;
+
+  // Saturation is judged over the whole flight, not only the
+  // stable phase. A hard climb pulls the rotor off its plateau,
+  // so the seconds with the throttle against the stop drop out
+  // of the stable set at exactly the moment that decides whether
+  // the power system kept up.
+  const inFlightIndexes = detectInFlightSamples({
+    timeSeconds: alignedTime,
+    headspeed: alignedHeadspeed
+  });
+
+  let flightSaturationPercent = saturationPercent;
+
+  if (inFlightIndexes) {
+    let flightSaturated = 0;
+    let flightCounted = 0;
+
+    for (const index of inFlightIndexes) {
+      const value = Number(alignedMotor[index]);
+
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+
+      flightCounted += 1;
+
+      if (value >= fullScale * 0.97) {
+        flightSaturated += 1;
+      }
+    }
+
+    if (flightCounted >= 100) {
+      flightSaturationPercent =
+        (flightSaturated / flightCounted) * 100;
+    }
+  }
 
   let ampsStats = null;
 
@@ -323,7 +370,7 @@ export function analyzeEscLab({
   }
 
   const status =
-    saturationPercent > 2
+    flightSaturationPercent > 2
       ? "attention"
       : headroomPercent < 12
         ? "watch"
@@ -331,20 +378,20 @@ export function analyzeEscLab({
 
   const story =
     status === "good"
-      ? `Healthy stable-flight headroom: motor output averages ${averagePercent.toFixed(
+      ? `Healthy headroom: stable-flight motor output averages ${averagePercent.toFixed(
           1
         )}% with ${headroomPercent.toFixed(
           1
-        )}% average reserve.`
+        )}% average reserve, and the output stayed clear of its ceiling across the whole flight.`
       : status === "watch"
         ? `Stable-flight motor output averages ${averagePercent.toFixed(
             1
           )}%, leaving ${headroomPercent.toFixed(
             1
-          )}% average reserve. Review the highest-load events before changing gearing or headspeed.`
-        : `ESC-reported throttle remained at or above 97% for ${saturationPercent.toFixed(
+          )}% average reserve. The highest-load events below show where that reserve went and what was asked in those moments.`
+        : `ESC-reported throttle sat at or above 97% for ${flightSaturationPercent.toFixed(
             1
-          )}% of stable flight. The governor had little remaining output authority during those periods.`;
+          )}% of the flight. During those moments the governor had no remaining output authority: the system was giving everything it had, and the flight asked for more than the gearing and headspeed can deliver.`;
 
   const metrics = [
     {
@@ -356,8 +403,8 @@ export function analyzeEscLab({
       value: `${headroomPercent.toFixed(1)}%`
     },
     {
-      label: "Stable time near ceiling",
-      value: `${saturationPercent.toFixed(1)}%`
+      label: "Flight time near ceiling",
+      value: `${flightSaturationPercent.toFixed(1)}%`
     },
     {
       label: "Stable samples used",
@@ -375,6 +422,13 @@ export function analyzeEscLab({
         1
       )} A (est.)`
     });
+  } else {
+    // The same capability state Home and Log Quality report: a fitted
+    // sensor with no usable data reads as unavailable, never as zero.
+    metrics.push({
+      label: "Stable current avg / peak",
+      value: "Unavailable — no usable current telemetry"
+    });
   }
 
   if (Number.isFinite(peakPower)) {
@@ -386,7 +440,9 @@ export function analyzeEscLab({
 
   return {
     status,
-    story,
+    story: voltageSourceNote
+      ? `${story} ${voltageSourceNote}`
+      : story,
     metrics,
 
     averageOutputPercent:
@@ -396,6 +452,9 @@ export function analyzeEscLab({
       Math.round(headroomPercent * 10) / 10,
 
     saturationPercent:
+      Math.round(flightSaturationPercent * 100) / 100,
+
+    stableSaturationPercent:
       Math.round(saturationPercent * 100) / 100,
 
     stableSampleCount:

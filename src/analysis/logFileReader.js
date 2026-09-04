@@ -53,15 +53,34 @@ export async function readLogFile(file) {
 
     const usable = flights
       .filter((flight) => flight.mainFrames.length > 0)
-      .map((flight) => ({
-        label:
-          flights.length > 1
-            ? `Flight ${flight.index + 1} (${flight.durationSeconds.toFixed(1)} s)`
-            : "Flight 1",
-        lines: decodedFlightToCsvLines(flight),
-        decodeInfo: describeDecode(flight),
-        stats: flight.stats
-      }));
+      .map((flight) => {
+        // Converting every flight in an "all flights" download
+        // up front makes the wait scale with the whole file, so
+        // each flight builds its rows the first time it is read
+        // and keeps them afterwards.
+        let cachedLines = null;
+
+        return {
+          label:
+            flights.length > 1
+              ? `Flight ${flight.index + 1} (${flight.durationSeconds.toFixed(1)} s)`
+              : "Flight 1",
+          // The decoded flight, kept alongside the CSV-shaped
+          // rows. "Share anonymized logs" builds its payload
+          // from decoded frames and headers, so it needs the
+          // flight itself rather than the rows derived from it.
+          decoded: flight,
+          get lines() {
+            if (cachedLines === null) {
+              cachedLines = decodedFlightToCsvLines(flight);
+            }
+
+            return cachedLines;
+          },
+          decodeInfo: describeDecode(flight),
+          stats: flight.stats
+        };
+      });
 
     return {
       file,

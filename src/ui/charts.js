@@ -15,6 +15,8 @@
 // ======================================================
 
 import uPlot from "../vendor/uplot/uPlot.esm.js";
+import { VIBRATION_FLOOR_HZ } from "../analysis/dsp/fft.js";
+
 import { CHART_COLORS } from "./chartColors.js";
 
 export { CHART_COLORS };
@@ -30,7 +32,12 @@ const IS_TOUCH =
 const AXIS_STYLE = {
   stroke: "#8ea6cc",
   grid: { stroke: "rgba(127, 183, 255, 0.08)", width: 1 },
-  ticks: { stroke: "rgba(127, 183, 255, 0.18)", width: 1 }
+  ticks: { stroke: "rgba(127, 183, 255, 0.18)", width: 1 },
+  // uPlot's default is a small 12px — the axes are where the
+  // reading actually happens, so they follow the app's type
+  // scale.
+  font: "13.5px 'Segoe UI', system-ui, sans-serif",
+  labelFont: "14px 'Segoe UI', system-ui, sans-serif"
 };
 
 function destroyExistingChart(element) {
@@ -84,10 +91,23 @@ export function friendlySeriesLabel(name) {
   const match = String(name).match(/^([A-Za-z]+)\[(\d)\]$/);
   if (!match) return name;
 
-  const axis = AXIS_NAMES[Number(match[2])];
-  if (!axis) return name;
-
   const base = match[1];
+  const index = Number(match[2]);
+
+  // Servos are wired by position, not by axis: cyclics on S1-S3,
+  // tail on S4 (Rotorflight convention).
+  if (/^servo$/i.test(base)) {
+    if (index <= 2) return `Cyclic servo ${index + 1}`;
+    if (index === 3) return "Tail servo";
+    return `Servo ${index + 1}`;
+  }
+
+  if (/^motor$/i.test(base)) {
+    return `Motor ${index + 1} output`;
+  }
+
+  const axis = AXIS_NAMES[index];
+  if (!axis) return name;
   if (/^gyroADC$/i.test(base)) return `${axis} gyro (filtered)`;
   if (/^(gyroRAW|gyroUnfilt)$/i.test(base)) return `${axis} gyro (raw)`;
   if (/^setpoint$/i.test(base)) return `${axis} target`;
@@ -98,6 +118,9 @@ export function friendlySeriesLabel(name) {
   return name;
 }
 
+// Whole-name aliases are kept in ONE wording with the Replay field
+// catalog (src/ui/replayFields.js) — a field must never wear two
+// different names on two pages (#63).
 const WHOLE_NAME_LABELS = {
   headspeed: "Headspeed",
   govTarget: "Governor target",
@@ -108,14 +131,21 @@ const WHOLE_NAME_LABELS = {
   govP: "Governor P",
   govI: "Governor I",
   govD: "Governor D",
-  govF: "Governor FF",
+  govF: "Governor feedforward",
   govSum: "Governor sum",
   EscV: "ESC voltage",
   EscI: "ESC current",
   EscThr: "ESC throttle",
-  Tesc: "ESC temp",
-  Tesc2: "ESC temp 2",
-  Tmcu: "MCU temp"
+  EscRPM: "ESC motor RPM",
+  EscCap: "ESC consumed capacity",
+  EscPwm: "ESC PWM",
+  Tesc: "ESC temperature",
+  Tesc2: "ESC 2 temperature",
+  Tmcu: "MCU temperature",
+  rssi: "Link strength (RSSI)",
+  Vbec: "BEC voltage",
+  BecV: "BEC voltage (ESC-reported)",
+  BecI: "BEC current"
 };
 
 export function friendlyLabel(name) {
@@ -161,7 +191,11 @@ const fmt = (value) =>
     ? String(Math.round(value))
     : String(Math.round(value * 10) / 10);
 
-function buildChartFooter(element, chart, seriesMeta, { withStats }) {
+function buildChartFooter(element, chart, seriesMeta, { withStats, formatX }) {
+  // Extrema positions are labeled by the x-axis's own unit: seconds
+  // for flight time, "Flight N" for history trends — never "2.0s"
+  // for what is actually the second logged flight.
+  const xText = formatX ?? ((value) => `${value.toFixed(1)}s`);
   const footer = document.createElement("div");
   footer.className = "chart-footer";
 
@@ -187,8 +221,8 @@ function buildChartFooter(element, chart, seriesMeta, { withStats }) {
         (entry) =>
           `<span class="chart-stat"><i style="background:${entry.color}"></i>` +
           `${entry.label}: ` +
-          `<b>▾ ${fmt(entry.min)}</b> @ ${entry.minX.toFixed(1)}s · ` +
-          `<b>▴ ${fmt(entry.max)}</b> @ ${entry.maxX.toFixed(1)}s</span>`
+          `<b>▾ ${fmt(entry.min)}</b> @ ${xText(entry.minX)} · ` +
+          `<b>▴ ${fmt(entry.max)}</b> @ ${xText(entry.maxX)}</span>`
       )
       .join("");
   };
@@ -248,7 +282,10 @@ export function renderTimeSeriesChart(element, options) {
     yLabel = "",
     xLabel = "Flight time (s)",
     markers = [],
-    linkGroup = null
+    bands = [],
+    linkGroup = null,
+    formatX = null,
+    initialWindow = null
   } = options;
 
   destroyExistingChart(element);
@@ -259,7 +296,10 @@ export function renderTimeSeriesChart(element, options) {
   ];
 
   const seriesMeta = series.map((entry, index) => ({
-    label: friendlyLabel(entry.label),
+    // A series that states its label exactly keeps it: the Replay
+    // field charts must not have a friendly-label layer guess a
+    // servo's function back into the legend (#63).
+    label: entry.exactLabel ? entry.label : friendlyLabel(entry.label),
     color: entry.color ?? CHART_COLORS[index % CHART_COLORS.length]
   }));
 
@@ -274,6 +314,43 @@ export function renderTimeSeriesChart(element, options) {
       },
       hooks: {
         draw: [
+          // Shaded x-ranges behind the traces: the stretch of
+          // time a measurement was taken from, so a marker is
+          // never read without the window it belongs to.
+          (u) => {
+            if (!bands.length) {
+              return;
+            }
+
+            const ctx = u.ctx;
+            ctx.save();
+            ctx.font = "12px sans-serif";
+            ctx.textAlign = "left";
+
+            for (const band of bands) {
+              const left = Math.max(
+                u.valToPos(band.min, "x", true),
+                u.bbox.left
+              );
+              const right = Math.min(
+                u.valToPos(band.max, "x", true),
+                u.bbox.left + u.bbox.width
+              );
+              if (!(right > left)) continue;
+              ctx.fillStyle = band.color ?? "rgba(120, 170, 255, 0.10)";
+              ctx.fillRect(left, u.bbox.top, right - left, u.bbox.height);
+              if (band.label) {
+                ctx.fillStyle = "rgba(220, 232, 255, 0.75)";
+                ctx.fillText(
+                  band.label,
+                  left + 4,
+                  u.bbox.top + u.bbox.height - 6
+                );
+              }
+            }
+
+            ctx.restore();
+          },
           // Small dots on each visible series' min and max —
           // they move with the zoom window.
           (u) => {
@@ -307,7 +384,7 @@ export function renderTimeSeriesChart(element, options) {
             ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
             ctx.fillStyle = "#dce8ff";
             ctx.setLineDash([4, 4]);
-            ctx.font = "12px sans-serif";
+            ctx.font = "13px sans-serif";
             ctx.textAlign = "center";
 
             for (const marker of markers) {
@@ -351,10 +428,15 @@ export function renderTimeSeriesChart(element, options) {
             value == null ? "--" : value.toFixed(2)
         },
         ...series.map((entry, index) => ({
-          label: friendlyLabel(entry.label),
+          label: entry.exactLabel ? entry.label : friendlyLabel(entry.label),
           stroke: entry.color ?? CHART_COLORS[index % CHART_COLORS.length],
           width: 1.4,
-          points: { show: false },
+          // pointsOnly: single measurements shown as dots with NO
+          // connecting line — two flights are two facts, not a trend
+          // (#65). The connecting stroke is what implies causality.
+          ...(entry.pointsOnly
+            ? { paths: () => null, points: { show: true, size: 8 } }
+            : { points: { show: false } }),
           value: (self, value) =>
             value == null ? "--" : String(Math.round(value * 100) / 100)
         }))
@@ -364,9 +446,21 @@ export function renderTimeSeriesChart(element, options) {
     element
   );
 
+  // The initial x-window is applied HERE, on the chart just built —
+  // never by a caller through a stored handle that can go stale and
+  // fail silently, leaving a full-flight view under an event card
+  // that names one moment (#71).
+  if (
+    initialWindow &&
+    Number.isFinite(initialWindow.min) &&
+    Number.isFinite(initialWindow.max) &&
+    initialWindow.max > initialWindow.min
+  ) {
+    chart.setScale("x", { min: initialWindow.min, max: initialWindow.max });
+  }
   element.__blackboxLabChart = chart;
   watchResize(element, chart);
-  buildChartFooter(element, chart, seriesMeta, { withStats: true });
+  buildChartFooter(element, chart, seriesMeta, { withStats: true, formatX });
 
   if (linkGroup) {
     joinLinkGroup(linkGroup, chart, element);
@@ -379,15 +473,31 @@ export function renderTimeSeriesChart(element, options) {
 // Noise spectrum (frequency domain)
 // ------------------------------------------------------
 export function renderSpectrumChart(element, spectra, options = {}) {
-  const { height = 260, markers = [] } = options;
+  const {
+    height = 260,
+    markers = [],
+    minimumHz = VIBRATION_FLOOR_HZ
+  } = options;
 
   destroyExistingChart(element);
 
   const first = spectra[0];
 
+  // The chart starts at the vibration floor. Near-DC bins carry
+  // maneuver energy many times taller than any real shake, and
+  // plotted together they flatten every vibration peak the
+  // verdict talks about into an invisible ripple — the evidence
+  // chart must be able to SHOW the peak it is cited for.
+  const firstBin = first.spectrum.frequencies.findIndex(
+    (hz) => hz >= minimumHz
+  );
+  const from = firstBin < 0 ? 0 : firstBin;
+
   const data = [
-    Float64Array.from(first.spectrum.frequencies),
-    ...spectra.map((entry) => Float64Array.from(entry.spectrum.magnitudes))
+    Float64Array.from(first.spectrum.frequencies.slice(from)),
+    ...spectra.map((entry) =>
+      Float64Array.from(entry.spectrum.magnitudes.slice(from))
+    )
   ];
 
   const chart = new uPlot(
@@ -408,7 +518,7 @@ export function renderSpectrumChart(element, spectra, options = {}) {
             ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
             ctx.fillStyle = "#dce8ff";
             ctx.setLineDash([4, 4]);
-            ctx.font = "12px sans-serif";
+            ctx.font = "13px sans-serif";
             ctx.textAlign = "center";
 
             let labelRow = 0;
